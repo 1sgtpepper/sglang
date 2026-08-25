@@ -28,8 +28,6 @@ from sglang.srt.managers.io_struct import (
     GetWeightsByNameReqInput,
     InitWeightsSendGroupForRemoteInstanceReqInput,
     InitWeightsUpdateGroupReqInput,
-    LoadLoRAAdapterFromDistributedReqInput,
-    LoadLoRAAdapterFromTensorsReqInput,
     LoadLoRAAdapterReqInput,
     RegisterLoRAAdapterReqInput,
     SendWeightsToRemoteInstanceReqInput,
@@ -180,85 +178,10 @@ class BaseTpWorker(ABC):
         result = self.model_runner.unload_lora_adapter(recv_req.to_ref())
         return result
 
-    def load_lora_adapter_from_tensors(
-        self, recv_req: LoadLoRAAdapterFromTensorsReqInput
-    ):
-        # TP sharding for LoRA happens inside the lora module (see
-        # lora/layers.py:46-49 and mem_pool.py:437-440). Each TP rank
-        # deserializes its own producer's bytes — same convention as
-        # ``update_weights_from_tensor`` above. One producer per one
-        # consumer means the CUDA-IPC ref counter on the producer's
-        # bucket drops cleanly each cycle.
-        monkey_patch_torch_reductions()
-        serialized = recv_req.serialized_named_tensors[self.ps.tp_rank]
-        if recv_req.load_format == "flattened_bucket":
-            flattened_data = MultiprocessingSerializer.deserialize(serialized)
-            bucket = FlattenedTensorBucket(
-                flattened_tensor=flattened_data["flattened_tensor"],
-                metadata=flattened_data["metadata"],
-            )
-            tensors = dict(bucket.reconstruct_tensors())
-        else:
-            tensors = MultiprocessingSerializer.deserialize(serialized)
-        if recv_req.expected_checksums is not None:
-            import hashlib
-
-            exp = recv_req.expected_checksums
-            mismatch, missing = [], []
-            for name, want in exp.items():
-                if name not in tensors:
-                    missing.append(name)
-                    continue
-                got = hashlib.sha256(
-                    tensors[name]
-                    .detach()
-                    .cpu()
-                    .contiguous()
-                    .flatten()
-                    .view(torch.uint8)
-                    .numpy()
-                    .tobytes()
-                ).hexdigest()
-                if got != want:
-                    mismatch.append(name)
-            extra = [n for n in tensors if n not in exp]
-            if mismatch or missing or extra:
-                raise RuntimeError(
-                    f"[LORA-CHECK] rank{self.ps.tp_rank} adapter sync MISMATCH of {len(exp)} expected: "
-                    f"{len(mismatch)} value-diff {mismatch[:5]}, {len(missing)} missing {missing[:5]}, "
-                    f"{len(extra)} extra {extra[:5]}"
-                )
-            logger.info(
-                f"[LORA-CHECK] rank{self.ps.tp_rank} adapter sync OK: {len(exp)}/{len(exp)} tensors match (sha256)"
-            )
-        result = self.model_runner.load_lora_adapter_from_tensors(
-            recv_req.to_ref(),
-            tensors,
-            recv_req.config_dict,
-            recv_req.added_tokens_config,
-            upsert=recv_req.upsert,
-        )
-        return result
-
     def register_lora_adapter(self, recv_req: RegisterLoRAAdapterReqInput):
         return self.model_runner.register_lora_adapter(
             recv_req.to_ref(), recv_req.config_dict
         )
-
-    def load_lora_adapter_from_distributed(
-        self, recv_req: LoadLoRAAdapterFromDistributedReqInput
-    ):
-        result = self.model_runner.load_lora_adapter_from_distributed(
-            recv_req.to_ref(),
-            recv_req.names,
-            recv_req.dtypes,
-            recv_req.shapes,
-            recv_req.config_dict,
-            recv_req.group_name,
-            recv_req.added_tokens_config,
-            upsert=recv_req.upsert,
-        )
-        return result
 
     def forward_batch_embedding(self, batch: ScheduleBatch):
         forward_batch = ForwardBatch.init_new(

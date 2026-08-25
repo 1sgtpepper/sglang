@@ -67,8 +67,6 @@ from sglang.srt.managers.io_struct import (
     GenerateReqInput,
     GetWeightsByNameReqInput,
     InitWeightsUpdateGroupReqInput,
-    LoadLoRAAdapterFromDistributedReqInput,
-    LoadLoRAAdapterFromTensorsReqInput,
     LoadLoRAAdapterReqInput,
     MultimodalDataInputFormat,
     OpenSessionReqInput,
@@ -1167,71 +1165,6 @@ class Engine(EngineScoreMixin, EngineBase):
         obj = GetWeightsByNameReqInput(name=name, truncate_size=truncate_size)
         return self.loop.run_until_complete(
             self.tokenizer_manager.get_weights_by_name(obj, None)
-        )
-
-    def load_lora_adapter_from_tensors(
-        self,
-        lora_name: str,
-        tensors,
-        config_dict: Dict,
-        load_format: Optional[str] = None,
-    ):
-        if load_format == "flattened_bucket":
-            serialized_named_tensors = list(tensors)
-        else:
-            serialized_named_tensors = [
-                MultiprocessingSerializer.serialize(tensors, output_str=True)
-                for _ in range(self.server_args.tp_size)
-            ]
-        lora_req = LoadLoRAAdapterFromTensorsReqInput(
-            lora_name=lora_name,
-            config_dict=config_dict,
-            serialized_named_tensors=serialized_named_tensors,
-            load_format=load_format,
-        )
-        return self.loop.run_until_complete(
-            self.tokenizer_manager.load_lora_adapter_from_tensors(lora_req, None)
-        )
-
-    def load_lora_adapter_from_distributed(
-        self,
-        lora_name: str,
-        config_dict: Dict,
-        names: list[str],
-        dtypes: list[str],
-        shapes: list[list[int]],
-        group_name: str = "weight_update_group",
-        pinned: bool = False,
-        added_tokens_config: Optional[Dict] = None,
-    ):
-        """Load a new LoRA adapter whose weights are broadcast over
-        a process group. The weight-update group must already be
-        initialized via `init_weights_update_group`."""
-        lora_req = LoadLoRAAdapterFromDistributedReqInput(
-            lora_name=lora_name,
-            config_dict=config_dict,
-            names=names,
-            dtypes=dtypes,
-            shapes=shapes,
-            group_name=group_name,
-            pinned=pinned,
-            added_tokens_config=added_tokens_config,
-        )
-        return self.loop.run_until_complete(
-            self.tokenizer_manager.load_lora_adapter_from_distributed(lora_req, None)
-        )
-
-    def load_lora_adapter(self, lora_name: str, lora_path: str, pinned: bool = False):
-        """Load a new LoRA adapter without re-launching the engine."""
-
-        obj = LoadLoRAAdapterReqInput(
-            lora_name=lora_name,
-            lora_path=lora_path,
-            pinned=pinned,
-        )
-
-        return self.loop.run_until_complete(
-            self.tokenizer_manager.load_lora_adapter(obj, None)
         )
 
     def unload_lora_adapter(self, lora_name: str):
