@@ -126,6 +126,7 @@ from sglang.srt.managers.io_struct import (
     PauseGenerationReqInput,
     ProfileReq,
     PullWeightsReqInput,
+    RegisterLoRAAdapterReqInput,
     ReleaseMemoryOccupationReqInput,
     RemoveExternalCorpusReqInput,
     RemoveExternalCorpusReqOutput,
@@ -1430,6 +1431,7 @@ class Scheduler(
                     LoadLoRAAdapterFromDistributedReqInput,
                     self.load_lora_adapter_from_distributed,
                 ),
+                (RegisterLoRAAdapterReqInput, self.register_lora_adapter),
                 (UnloadLoRAAdapterReqInput, self.unload_lora_adapter),
                 (PauseGenerationReqInput, self.pause_generation),
                 (ContinueGenerationReqInput, self.continue_generation),
@@ -4411,6 +4413,12 @@ class Scheduler(
         """In-place loading a new lora adapter broadcast over a process group."""
 
         result = self.tp_worker.load_lora_adapter_from_distributed(recv_req)
+        return result
+
+    def register_lora_adapter(self, recv_req: RegisterLoRAAdapterReqInput):
+        """Create-or-refresh an adapter's identity and config (weights zeroed)."""
+
+        result = self.tp_worker.register_lora_adapter(recv_req)
         return result
 
     def unload_lora_adapter(
