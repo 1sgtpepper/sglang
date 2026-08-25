@@ -94,7 +94,6 @@ _REACHED_BY_SHAPES = frozenset(
         "enable_dp_attention",
         "enable_dp_attention_local_control_broadcast",
         "enable_dp_lm_head",
-        "enable_flashinfer_allreduce_fusion",
         "encoder_transfer_backend",
         "enforce_disable_flashinfer_allreduce_fusion",
         "ep_size",

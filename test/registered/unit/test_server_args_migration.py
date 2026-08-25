@@ -145,9 +145,9 @@ class TestServerArgsAnnotatedCli(CustomTestCase):
             )
 
     def test_deprecated_flags_still_work(self):
-        """Deprecated flags set the correct dest field."""
-        sa = self._parse(["--stream-output"])
-        self.assertTrue(sa.incremental_streaming_output)
+        """A deprecated flag inside its redirect window sets the new dest."""
+        sa = self._parse(["--enable-gdn-replayssm-spec"])
+        self.assertTrue(sa.enable_linear_replayssm_spec)
 
     def test_combined_parse(self):
         """Multiple option types parsed together in one invocation."""

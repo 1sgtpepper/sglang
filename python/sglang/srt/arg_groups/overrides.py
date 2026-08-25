@@ -831,7 +831,7 @@ def _deepseek_family_overrides(server_args: Any, hf_config: Any) -> dict:
     return overrides
 
 
-# Keep in sync with MIMO_V2_MODEL_ARCHS (server_args.py / configs/hf_config.py).
+# Keep in sync with MIMO_V2_MODEL_ARCHS (configs/model_config.py).
 @_register_for("MiMoV2ForCausalLM", "MiMoV2FlashForCausalLM")
 def _mimo_v2_overrides(server_args: Any, hf_config: Any) -> dict:
     overrides: Dict[str, Any] = {}
@@ -1140,7 +1140,8 @@ def _gpt_oss_overrides(server_args: Any, hf_config: Any) -> dict:
     return overrides
 
 
-# Keep in sync with LLAMA4_MODEL_ARCHS (server_args.py).
+# Keep in sync with the Llama4 branch of _handle_model_specific_adjustments
+# (server_args.py).
 @_register_for("Llama4ForConditionalGeneration", "Llama4ForCausalLM")
 def _llama4_overrides(server_args: Any, hf_config: Any) -> dict:
     if server_args.device == "cpu":

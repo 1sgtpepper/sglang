@@ -4,9 +4,7 @@ from sglang.test.ascend.e2e.test_npu_accuracy_utils import (
     TestNpuAccuracyMultiNodePdSepTestCaseBase,
 )
 from sglang.test.ascend.e2e.test_npu_multi_node_utils import NIC_NAME
-from sglang.test.ascend.e2e.test_npu_performance_utils import (
-    GLM_5_1_W4A8_MODEL_PATH,
-)
+from sglang.test.ascend.e2e.test_npu_performance_utils import GLM_5_1_W4A8_MODEL_PATH
 from sglang.test.ci.ci_register import register_npu_ci
 
 register_npu_ci(
@@ -139,7 +137,6 @@ GLM_5_1_PD_SEP_DECODE_ARGS = [
     180000,
     "--tokenizer-worker-num",
     16,
-    "--prefill-round-robin-balance",
     "--disable-shared-experts-fusion",
     "--dtype",
     "bfloat16",

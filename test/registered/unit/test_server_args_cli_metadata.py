@@ -86,7 +86,9 @@ class TestServerArgsMigratedCliMetadata(CustomTestCase):
         }
 
         self.assertFalse(MIGRATED_OPTIONS & manual_options)
-        self.assertIn("--prefill-round-robin-balance", manual_options)
+        # Sentinel: a flag that is still registered by hand, proving the scan
+        # above actually sees add_cli_args' manual section.
+        self.assertIn("--config", manual_options)
 
     def test_argparse_shape_is_preserved_for_representative_migrated_options(self):
         self.assertEqual(self.actions_by_option["--dtype"].default, ServerArgs.dtype)
