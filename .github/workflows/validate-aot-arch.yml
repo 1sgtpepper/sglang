@@ -1,0 +1,84 @@
+name: Validate AOT architecture selection
+
+on:
+  push:
+    branches:
+      - fix/aot-arch-detection
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  default-architecture:
+    name: Check default architecture fallback
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reproduce and verify the default architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          root="$(mktemp -d)"
+          trap 'rm -rf "${root}"' EXIT
+          mkdir -p "${root}/bin" "${root}/base" "${root}/fixed"
+          mkdir -p "${root}/home-base" "${root}/home-fixed"
+
+          cat >"${root}/bin/uname" <<'SH'
+          #!/bin/sh
+          if [ "${1:-}" = "-i" ]; then
+            echo unknown
+          else
+            exec /usr/bin/uname "$@"
+          fi
+          SH
+          chmod +x "${root}/bin/uname"
+
+          cat >"${root}/bin/docker" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          printf '%s\n' "$*" >>"${DOCKER_LOG:?}"
+          SH
+          chmod +x "${root}/bin/docker"
+
+          git show HEAD~2:python/sglang/kernels/aot/build.sh >"${root}/base/build.sh"
+          chmod +x "${root}/base/build.sh"
+
+          (
+            cd "${root}/base"
+            HOME="${root}/home-base" \
+              PATH="${root}/bin:${PATH}" \
+              DOCKER_LOG="${root}/base/docker.log" \
+              bash ./build.sh 3.10 13.0
+          )
+          grep -F -- '--build-arg ARCH=unknown' "${root}/base/docker.log"
+          if grep -F -- '--build-arg ARCH=x86_64' "${root}/base/docker.log"; then
+            echo 'The baseline unexpectedly selected x86_64.' >&2
+            exit 1
+          fi
+
+          (
+            cd "${GITHUB_WORKSPACE}/python/sglang/kernels/aot"
+            HOME="${root}/home-fixed" \
+              PATH="${root}/bin:${PATH}" \
+              DOCKER_LOG="${root}/fixed/docker.log" \
+              bash ./build.sh 3.10 13.0
+          )
+          grep -F -- '--build-arg ARCH=x86_64' "${root}/fixed/docker.log"
+          if grep -F -- '--build-arg ARCH=unknown' "${root}/fixed/docker.log"; then
+            echo 'The fixed script still selected unknown.' >&2
+            exit 1
+          fi
+
+          base_url='https://github.com/Kitware/CMake/releases/download/v3.31.1'
+          unknown_status="$(curl -L -sS -o /dev/null -w '%{http_code}' \
+            "${base_url}/cmake-3.31.1-linux-unknown.tar.gz")"
+          x86_status="$(curl -L -sS -o /dev/null -w '%{http_code}' \
+            "${base_url}/cmake-3.31.1-linux-x86_64.tar.gz")"
+          test "${unknown_status}" = 404
+          test "${x86_status}" = 200
