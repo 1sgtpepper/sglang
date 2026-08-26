@@ -376,5 +376,26 @@ def test_topk_v2_ragged_no_row_starts(k: int) -> None:
         assert sorted(explicit[i]) == sorted(implicit[i]), f"row {i} differs"
 
 
+@torch.inference_mode()
+def test_topk_v2_ragged_extreme_scores_do_not_escape_window() -> None:
+    """A masked prefix must not win against the lowest representable scores."""
+    scores = torch.full((1, 8), float("-inf"), dtype=torch.float32, device="cuda")
+    scores[0, 1] = torch.finfo(scores.dtype).min
+    lengths = torch.tensor([4], dtype=torch.int32, device="cuda")
+    starts = torch.tensor([1], dtype=torch.int32, device="cuda")
+    out = torch.empty((1, 1), dtype=torch.int32, device="cuda")
+
+    topk_transform_ragged_v2(
+        scores,
+        lengths,
+        out_offsets=starts,
+        out_indices=out,
+        row_starts=starts,
+    )
+    torch.cuda.synchronize()
+
+    assert out.item() == 1
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
