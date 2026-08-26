@@ -11,7 +11,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""The arguments of the server."""
+"""Server argument declarations, resolution, and CLI registration.
+
+Keep this file in the following top-level order:
+
+1. Imports and the module logger.
+2. Public extension-point choice lists, with each legacy ``add_*`` alias
+   immediately below the ``Choices`` declaration it extends.
+3. Shared (non-extensible) choice lists, scalar defaults, and deprecated
+   aliases. A choice list used by only one field belongs inline in that field.
+4. ``ServerArgs``: fields first, then resolution/validation helpers, then CLI
+   registration and small query helpers. New resolution steps are appended at
+   the end of ``_run_resolution_pipeline`` unless an earlier dependency is
+   documented explicitly.
+5. Module-level ``ServerArgs`` construction/runtime shims.
+6. Networking constants and ``PortArgs``.
+
+Model- or vendor-specific utilities belong in ``sglang.srt.arg_groups`` (or
+their owning subsystem), not before ``ServerArgs`` in this module.
+"""
 
 from __future__ import annotations
 
@@ -41,7 +59,6 @@ from sglang.srt.arg_groups.arg_utils import (
     add_cli_args_from_dataclass,
 )
 from sglang.srt.arg_groups.argparse_actions import (
-    DeprecatedAction,
     DeprecatedAliasStoreAction,
     DeprecatedStoreConstAction,
     DeprecatedStoreTrueAction,
@@ -419,8 +436,6 @@ DSA_CHOICES = [
     "trtllm",
 ]
 
-DSA_PREFILL_CP_SPLIT_CHOICES = ["in-seq-split", "round-robin-split"]
-
 DSA_TOPK_BACKEND_CHOICES = ["sgl-kernel", "torch", "flashinfer"]
 
 MOE_A2A_BACKEND_CHOICES = [
@@ -435,8 +450,6 @@ MOE_A2A_BACKEND_CHOICES = [
     "pplx",
     "ascend_tp",
 ]
-
-PREFILL_CP_SPLIT_CHOICES = ["in-seq-split"]
 
 # --------------------------------------------------------------------------
 # Scalar defaults and sentinels.
@@ -460,8 +473,6 @@ MIS_DELIMITER_TOKEN_ID = 9999
 # --------------------------------------------------------------------------
 
 NSA_CHOICES = DSA_CHOICES  # deprecated alias
-
-NSA_PREFILL_CP_SPLIT_CHOICES = DSA_PREFILL_CP_SPLIT_CHOICES  # deprecated alias
 
 # --------------------------------------------------------------------------
 # Append new extension points at the END of the matching group above. A new
@@ -504,7 +515,7 @@ class ServerArgs:
        registered manually in ``add_cli_args``:
 
        - **Deprecated flags** that redirect to another field via
-         ``DeprecatedAction`` / ``DeprecatedAliasStoreAction`` / etc.
+         ``DeprecatedAliasStoreAction`` / ``DeprecatedStoreTrueAction`` / etc.
        - **Dynamic choices** computed at runtime (e.g. ``reasoning_parser``
          whose choices come from a plugin registry).
        - The ``--config`` meta-argument (not a dataclass field).
@@ -525,10 +536,10 @@ class ServerArgs:
        time and silently stops tracking extensions.
 
     6. **Deprecating a flag.** Mark the registration with
-       ``# Deprecated YYYY-MM-DD``. Within 2 months it may redirect
-       (``DeprecatedAliasStoreAction`` and friends); after 2 months it becomes
-       a hard error (``DeprecatedAction(error_message=...)``); after 4 months
-       the flag, its field, and its handler branch are deleted.
+       ``# Deprecated YYYY-MM-DD`` and keep registrations sorted by date, then
+       flag name. This cleanup preserves warning redirects so repository users
+       can migrate without a flag-day change. Enforce age-based hard errors and
+       removals in a dedicated follow-up PR after callers have migrated.
     """
 
     # -------------------------------------------------------------------------
@@ -3873,15 +3884,25 @@ class ServerArgs:
         # _handle_model_specific_adjustments never runs.
         self._resolved_overrides = []
 
-        # Everything above the dummy-model boundary states why it is there.
+        # ------------------------------------------------------------------
+        # PRE-DUMMY EXCEPTIONS -- DO NOT APPEND NEW WORK HERE.
+        #
+        # These five handlers have proven dummy-path consumers, documented in
+        # their docstrings and pinned by tests. New normalization and validation
+        # steps belong at the END of the pipeline unless a concrete dummy-path
+        # consumer or an earlier dependency requires otherwise.
+        # ------------------------------------------------------------------
         self._handle_moe_backend_aliases()
         self._handle_return_hidden_states_mode()
         self._handle_media_url_security()
         self._handle_hicache_ratio_default()
         self._validate_prefill_decode_interval()
-        self._handle_hardware_runtime_validation()
         if self.model_path.lower() in ["none", "dummy"]:
             return
+
+        # Runtime-specific validation is irrelevant to the dummy model but
+        # should still fail before model-path downloads and model inspection.
+        self._handle_hardware_runtime_validation()
 
         self._handle_model_source_paths()
 
@@ -4039,9 +4060,9 @@ class ServerArgs:
         self._handle_model_capability_adjustments()
 
         # ------------------------------------------------------------------
-        # APPEND NEW RESOLUTION STEPS DIRECTLY ABOVE THIS BANNER, not at the
-        # top of the method. See principle 6. materialize_declarations() must
-        # stay the last statement.
+        # APPEND NEW RESOLUTION / VALIDATION STEPS DIRECTLY ABOVE THIS BANNER.
+        # Do not prepend them near the dummy-model boundary. See principle 6;
+        # materialize_declarations() must stay the last statement.
         # ------------------------------------------------------------------
 
         # End of resolution: apply the accumulated declarations onto the
@@ -4459,20 +4480,8 @@ class ServerArgs:
         )
 
     def _handle_deprecated_args(self):
-        # Deprecated 2026-08-12
-        if self.disable_fast_image_processor:
-            if self.image_processor_backend not in {"auto", "pil"}:
-                raise ValueError(
-                    "--disable-fast-image-processor conflicts with "
-                    f"--image-processor-backend={self.image_processor_backend}."
-                )
-            logger.warning(
-                "--disable-fast-image-processor is deprecated; use "
-                "--image-processor-backend=pil instead."
-            )
-            self._declare("_handle_deprecated_args", image_processor_backend="pil")
-
-        # Deprecated attention-backend alias: "compressed" -> "dsv4".
+        # Deprecated 2026-05-07: redirect retained until the follow-up
+        # deprecation-enforcement PR.
         renamed = {}
         for attr in (
             "attention_backend",
@@ -4500,6 +4509,19 @@ class ServerArgs:
                 "_handle_deprecated_args",
                 smg_grpc_mode=True,
             )
+
+        # Deprecated 2026-08-12
+        if self.disable_fast_image_processor:
+            if self.image_processor_backend not in {"auto", "pil"}:
+                raise ValueError(
+                    "--disable-fast-image-processor conflicts with "
+                    f"--image-processor-backend={self.image_processor_backend}."
+                )
+            logger.warning(
+                "--disable-fast-image-processor is deprecated; use "
+                "--image-processor-backend=pil instead."
+            )
+            self._declare("_handle_deprecated_args", image_processor_backend="pil")
 
         # Native gRPC tuning knob is env-only; --grpc-port (CLI) enables the
         # native server, falling back to SGLANG_GRPC_PORT.
@@ -4756,9 +4778,12 @@ class ServerArgs:
             )
 
     def _handle_hardware_runtime_validation(self):
-        """Above the dummy-model boundary: reject an explicitly enabled but
-        incompatible hardware runtime before model path resolution, downloads,
-        or the short circuit."""
+        """Reject an explicitly enabled but incompatible hardware runtime.
+
+        This runs immediately after the dummy-model boundary: dummy fixtures do
+        not initialize a hardware runtime, while real launches still fail
+        before model-path downloads or model inspection.
+        """
         # This is intentionally independent of self.device: setting
         # SGLANG_USE_MLX opts into the MLX backend and must fail immediately if
         # the environment cannot honor that request. With the flag unset,
@@ -9424,24 +9449,59 @@ class ServerArgs:
         )
 
         # --- Deprecated argument registrations ---
-        # Each entry carries the date it was deprecated. The clock:
-        #   < 2 months  -- redirect with a warning (Deprecated*Action)
-        #   2-4 months  -- hard error via DeprecatedAction(error_message=...)
-        #   > 4 months  -- delete the flag, its field, and its handler branch
-        # Ordered oldest-first; append new entries at the end.
-        # Deprecated 2026-08-16
+        # Sorted by deprecation date, then flag name. This PR intentionally
+        # preserves warning redirects for every entry; enforce hard errors and
+        # removals in a follow-up PR after repository callers have migrated.
+        # Deprecated 2026-05-16
         parser.add_argument(
-            "--enable-expert-distribution-metrics",
-            action=DeprecatedAction,
-            error_message=(
-                "--enable-expert-distribution-metrics is no longer supported. Use "
-                "--expert-balancedness-report-mode with one of: off, server_log, "
-                "prometheus, both."
-            ),
+            "--speculative-dflash-draft-window-size",
+            type=int,
+            dest="speculative_draft_window_size",
+            action=DeprecatedAliasStoreAction,
+            new_flag="--speculative-draft-window-size",
+            help=argparse.SUPPRESS,
+        )
+        # Deprecated 2026-05-20
+        parser.add_argument(
+            "--dsa-prefill-cp-mode",
+            dest="dsa_prefill_cp_mode",
+            action=DeprecatedAliasStoreAction,
+            new_flag="--cp-strategy",
+            type=str,
+            default=ServerArgs.dsa_prefill_cp_mode,
+            choices=["in-seq-split", "round-robin-split"],
             help=(
-                "Removed. Use --expert-balancedness-report-mode with one of: "
-                "off, server_log, prometheus, both."
+                "[Deprecated] Use --cp-strategy {zigzag,interleave} instead. "
+                "'in-seq-split' maps to 'zigzag'; 'round-robin-split' maps to "
+                "'interleave'."
             ),
+        )
+        # Deprecated 2026-05-20
+        parser.add_argument(
+            "--enable-dsa-prefill-context-parallel",
+            dest="enable_dsa_prefill_context_parallel",
+            action=DeprecatedStoreTrueAction,
+            new_flag="--enable-prefill-cp",
+            help="[Deprecated] Use --enable-prefill-cp instead.",
+        )
+        # Deprecated 2026-05-20
+        parser.add_argument(
+            "--enable-nsa-prefill-context-parallel",
+            dest="enable_dsa_prefill_context_parallel",
+            action=DeprecatedStoreTrueAction,
+            new_flag="--enable-prefill-cp",
+            help="[Deprecated] Use --enable-prefill-cp instead.",
+        )
+        # Deprecated 2026-05-20
+        parser.add_argument(
+            "--nsa-decode-backend",
+            dest="dsa_decode_backend",
+            action=DeprecatedAliasStoreAction,
+            new_flag="--dsa-decode-backend",
+            default=argparse.SUPPRESS,
+            type=str,
+            choices=DSA_CHOICES,
+            help="[Deprecated] Use --dsa-decode-backend instead.",
         )
         # Deprecated 2026-05-20
         parser.add_argument(
@@ -9456,42 +9516,14 @@ class ServerArgs:
         )
         # Deprecated 2026-05-20
         parser.add_argument(
-            "--nsa-decode-backend",
-            dest="dsa_decode_backend",
+            "--nsa-prefill-cp-mode",
+            dest="dsa_prefill_cp_mode",
             action=DeprecatedAliasStoreAction,
-            new_flag="--dsa-decode-backend",
+            new_flag="--cp-strategy",
+            type=str,
             default=argparse.SUPPRESS,
-            type=str,
-            choices=DSA_CHOICES,
-            help="[Deprecated] Use --dsa-decode-backend instead.",
-        )
-        # Deprecated 2026-05-16
-        parser.add_argument(
-            "--speculative-dflash-draft-window-size",
-            type=int,
-            dest="speculative_draft_window_size",
-            action=DeprecatedAliasStoreAction,
-            new_flag="--speculative-draft-window-size",
-            help=argparse.SUPPRESS,
-        )
-        # Deprecated 2026-06-19
-        parser.add_argument(
-            "--mamba-scheduler-strategy",
-            dest="mamba_radix_cache_strategy",
-            type=str,
-            action=DeprecatedAliasStoreAction,
-            new_flag="--mamba-radix-cache-strategy",
-            default=ServerArgs.mamba_radix_cache_strategy,
-            help="Deprecated alias for --mamba-radix-cache-strategy.",
-        )
-        # Deprecated 2026-06-09
-        parser.add_argument(
-            "--cuda-graph-max-bs",
-            type=int,
-            action=DeprecatedAliasStoreAction,
-            new_flag="--cuda-graph-max-bs-decode",
-            dest="cuda_graph_max_bs_decode",
-            help="Deprecated alias for --cuda-graph-max-bs-decode.",
+            choices=["in-seq-split", "round-robin-split"],
+            help="[Deprecated] Use --cp-strategy instead.",
         )
         # Deprecated 2026-06-09
         parser.add_argument(
@@ -9505,19 +9537,19 @@ class ServerArgs:
         )
         # Deprecated 2026-06-09
         parser.add_argument(
+            "--cuda-graph-max-bs",
+            type=int,
+            action=DeprecatedAliasStoreAction,
+            new_flag="--cuda-graph-max-bs-decode",
+            dest="cuda_graph_max_bs_decode",
+            help="Deprecated alias for --cuda-graph-max-bs-decode.",
+        )
+        # Deprecated 2026-06-09
+        parser.add_argument(
             "--disable-cuda-graph",
             action=DeprecatedStoreTrueAction,
             new_flag="--cuda-graph-backend-{decode,prefill}=disabled",
             help="Deprecated. Use --cuda-graph-backend-{decode,prefill}=disabled instead.",
-        )
-        # Deprecated 2026-06-09
-        parser.add_argument(
-            "--enable-breakable-cuda-graph",
-            action=DeprecatedStoreConstAction,
-            dest="cuda_graph_backend_prefill",
-            const_value=Backend.BREAKABLE,
-            new_flag="--cuda-graph-backend-prefill=breakable",
-            help="Deprecated alias for --cuda-graph-backend-prefill=breakable.",
         )
         # Deprecated 2026-06-09
         parser.add_argument(
@@ -9530,6 +9562,15 @@ class ServerArgs:
         )
         # Deprecated 2026-06-09
         parser.add_argument(
+            "--enable-breakable-cuda-graph",
+            action=DeprecatedStoreConstAction,
+            dest="cuda_graph_backend_prefill",
+            const_value=Backend.BREAKABLE,
+            new_flag="--cuda-graph-backend-prefill=breakable",
+            help="Deprecated alias for --cuda-graph-backend-prefill=breakable.",
+        )
+        # Deprecated 2026-06-09
+        parser.add_argument(
             "--enforce-piecewise-cuda-graph",
             action=DeprecatedStoreConstAction,
             dest="cuda_graph_backend_prefill",
@@ -9538,16 +9579,6 @@ class ServerArgs:
             help="Deprecated alias for --cuda-graph-backend-prefill=tc_piecewise. "
             "Explicitly setting the prefill backend now skips the auto-disable "
             "cascade automatically.",
-        )
-        # Deprecated 2026-06-09
-        parser.add_argument(
-            "--piecewise-cuda-graph-tokens",
-            type=int,
-            nargs="+",
-            action=DeprecatedAliasStoreAction,
-            new_flag="--cuda-graph-bs-prefill",
-            dest="cuda_graph_bs_prefill",
-            help="Deprecated alias for --cuda-graph-bs-prefill.",
         )
         # Deprecated 2026-06-09
         parser.add_argument(
@@ -9568,29 +9599,15 @@ class ServerArgs:
             dest="cuda_graph_max_bs_prefill",
             help="Deprecated alias for --cuda-graph-max-bs-prefill.",
         )
-        # Deprecated 2026-05-20
+        # Deprecated 2026-06-09
         parser.add_argument(
-            "--enable-dsa-prefill-context-parallel",
-            dest="enable_dsa_prefill_context_parallel",
-            action=DeprecatedStoreTrueAction,
-            new_flag="--enable-prefill-cp",
-            help="[Deprecated] Use --enable-prefill-cp instead.",
-        )
-        # Deprecated 2026-05-20
-        parser.add_argument(
-            "--enable-nsa-prefill-context-parallel",
-            dest="enable_dsa_prefill_context_parallel",
-            action=DeprecatedStoreTrueAction,
-            new_flag="--enable-prefill-cp",
-            help="[Deprecated] Use --enable-prefill-cp instead.",
-        )
-        # Deprecated 2026-08-04
-        parser.add_argument(
-            "--enable-gdn-replayssm-spec",
-            dest="enable_linear_replayssm_spec",
-            action=DeprecatedStoreTrueAction,
-            new_flag="--enable-linear-replayssm-spec",
-            help="[Deprecated] Use --enable-linear-replayssm-spec instead.",
+            "--piecewise-cuda-graph-tokens",
+            type=int,
+            nargs="+",
+            action=DeprecatedAliasStoreAction,
+            new_flag="--cuda-graph-bs-prefill",
+            dest="cuda_graph_bs_prefill",
+            help="Deprecated alias for --cuda-graph-bs-prefill.",
         )
         # Deprecated 2026-06-10
         parser.add_argument(
@@ -9600,32 +9617,6 @@ class ServerArgs:
             new_flag="--enable-prefill-cp",
             help="[Deprecated] Use --enable-prefill-cp instead.",
         )
-        # Deprecated 2026-05-20
-        parser.add_argument(
-            "--dsa-prefill-cp-mode",
-            dest="dsa_prefill_cp_mode",
-            action=DeprecatedAliasStoreAction,
-            new_flag="--cp-strategy",
-            type=str,
-            default=ServerArgs.dsa_prefill_cp_mode,
-            choices=DSA_PREFILL_CP_SPLIT_CHOICES,
-            help=(
-                "[Deprecated] Use --cp-strategy {zigzag,interleave} instead. "
-                "'in-seq-split' maps to 'zigzag'; 'round-robin-split' maps to "
-                "'interleave'."
-            ),
-        )
-        # Deprecated 2026-05-20
-        parser.add_argument(
-            "--nsa-prefill-cp-mode",
-            dest="dsa_prefill_cp_mode",
-            action=DeprecatedAliasStoreAction,
-            new_flag="--cp-strategy",
-            type=str,
-            default=argparse.SUPPRESS,
-            choices=DSA_PREFILL_CP_SPLIT_CHOICES,
-            help="[Deprecated] Use --cp-strategy instead.",
-        )
         # Deprecated 2026-06-10
         parser.add_argument(
             "--prefill-cp-mode",
@@ -9634,11 +9625,39 @@ class ServerArgs:
             new_flag="--cp-strategy",
             type=str,
             default=ServerArgs.prefill_cp_mode,
-            choices=PREFILL_CP_SPLIT_CHOICES,
+            choices=["in-seq-split"],
             help=(
                 "[Deprecated] Use --cp-strategy {zigzag,interleave} instead. "
                 "'in-seq-split' maps to 'zigzag'."
             ),
+        )
+        # Deprecated 2026-06-19
+        parser.add_argument(
+            "--mamba-scheduler-strategy",
+            dest="mamba_radix_cache_strategy",
+            type=str,
+            action=DeprecatedAliasStoreAction,
+            new_flag="--mamba-radix-cache-strategy",
+            default=ServerArgs.mamba_radix_cache_strategy,
+            help="Deprecated alias for --mamba-radix-cache-strategy.",
+        )
+        # Deprecated 2026-08-04
+        parser.add_argument(
+            "--enable-gdn-replayssm-spec",
+            dest="enable_linear_replayssm_spec",
+            action=DeprecatedStoreTrueAction,
+            new_flag="--enable-linear-replayssm-spec",
+            help="[Deprecated] Use --enable-linear-replayssm-spec instead.",
+        )
+        # Deprecated 2026-08-16
+        parser.add_argument(
+            "--enable-expert-distribution-metrics",
+            dest="expert_balancedness_report_mode",
+            action=DeprecatedStoreConstAction,
+            const_value="server_log",
+            new_flag="--expert-balancedness-report-mode=server_log",
+            default=argparse.SUPPRESS,
+            help="[Deprecated] Use --expert-balancedness-report-mode=server_log.",
         )
 
     @classmethod

@@ -94,6 +94,19 @@ class TestPrepareServerArgs(CustomTestCase):
         ):
             ServerArgs(model_path="dummy", prefill_decode_interval=-1).resolve_once()
 
+    def test_hardware_runtime_validation_runs_only_after_dummy_boundary(self):
+        with patch.object(
+            ServerArgs,
+            "_handle_hardware_runtime_validation",
+            side_effect=RuntimeError("hardware validation reached"),
+        ) as validate_runtime:
+            ServerArgs(model_path="dummy").resolve_once()
+            validate_runtime.assert_not_called()
+
+            with self.assertRaisesRegex(RuntimeError, "hardware validation reached"):
+                ServerArgs(model_path="real-model").resolve_once()
+            validate_runtime.assert_called_once_with()
+
     def test_dsv4_prefill_backend_cli_choices(self):
         parser = server_args_module.argparse.ArgumentParser()
         ServerArgs.add_cli_args(parser)
