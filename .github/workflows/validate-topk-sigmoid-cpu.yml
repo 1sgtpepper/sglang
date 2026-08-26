@@ -1,0 +1,66 @@
+name: Validate CPU top-k sigmoid bounds
+
+on:
+  push:
+    branches:
+      - validate/topk-sigmoid-tail
+
+permissions:
+  contents: read
+
+jobs:
+  asan:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libnuma-dev
+
+      - name: Build CPU extension with AddressSanitizer
+        env:
+          CXXFLAGS: -fsanitize=address -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: |
+          uv venv --python 3.12
+          source .venv/bin/activate
+          uv pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
+          uv pip install scikit-build-core cmake ninja wheel
+          cd python/sglang/kernels/aot
+          cp pyproject_cpu.toml pyproject.toml
+          uv pip install . --no-build-isolation
+
+      - name: Reproduce the small expert-count case
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+        run: |
+          source .venv/bin/activate
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so)"
+          python - <<'PY'
+          import sgl_kernel  # noqa: F401
+          import torch
+
+          for dtype in (torch.float32, torch.bfloat16):
+              gating_output = torch.zeros((1, 1), dtype=dtype)
+              correction_bias = torch.zeros(1, dtype=torch.float32)
+              weights, ids = torch.ops.sgl_kernel.topk_sigmoid_cpu(
+                  hidden_states=torch.zeros((1, 1), dtype=dtype),
+                  gating_output=gating_output,
+                  topk=1,
+                  renormalize=False,
+                  correction_bias=correction_bias,
+              )
+              assert ids.item() == 0
+              torch.testing.assert_close(weights, torch.full_like(weights, 0.5))
+          PY
