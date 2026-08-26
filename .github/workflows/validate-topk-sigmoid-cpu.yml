@@ -37,6 +37,11 @@ jobs:
           source .venv/bin/activate
           uv pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
           uv pip install scikit-build-core cmake ninja wheel
+          # The hosted runner does not expose the AVX512/AMX features used by
+          # the package's x86-64-v4 build. Keep the same source on a generic
+          # x86 target so ASan can execute the vector tail case.
+          sed -i 's/-march=x86-64-v4/-march=x86-64/' \
+            python/sglang/kernels/aot/csrc/cpu/CMakeLists.txt
           cd python/sglang/kernels/aot
           cp pyproject_cpu.toml pyproject.toml
           uv pip install . --no-build-isolation
