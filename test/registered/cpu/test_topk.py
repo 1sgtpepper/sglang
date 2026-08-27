@@ -383,6 +383,37 @@ class TestCustomTopK(CustomTestCase):
                 topk_weights, expected_weights, atol=1e-4, rtol=1e-4
             )
 
+    def test_topk_sigmoid_with_correction_bias_small_expert_counts(self):
+        for dtype, num_experts in itertools.product(
+            [torch.float16, torch.bfloat16, torch.float32],
+            [1, 2, 4, 8, 16],
+        ):
+            with self.subTest(dtype=dtype, num_experts=num_experts):
+                hidden_states = torch.zeros((1, 1), dtype=dtype)
+                gating_output = (
+                    torch.arange(num_experts, dtype=torch.float32)
+                    .reshape(1, -1)
+                    .to(dtype)
+                )
+                correction_bias = torch.zeros(num_experts, dtype=torch.float32)
+
+                topk_weights, topk_ids = torch.ops.sgl_kernel.topk_sigmoid_cpu(
+                    hidden_states=hidden_states,
+                    gating_output=gating_output,
+                    topk=1,
+                    renormalize=False,
+                    correction_bias=correction_bias,
+                )
+
+                scores = torch.sigmoid(gating_output.float())
+                expected_ids = scores.argmax(dim=-1, keepdim=True).to(torch.int32)
+                expected_weights = scores.gather(1, expected_ids.to(torch.int64))
+
+                self.assertTrue(torch.equal(topk_ids, expected_ids))
+                torch.testing.assert_close(
+                    topk_weights, expected_weights, atol=1e-4, rtol=1e-4
+                )
+
     def test_topk_sigmoid_mixed_input_dtypes(self):
         torch.manual_seed(0)
         hidden_states = torch.randn((17, 16), dtype=torch.bfloat16)
