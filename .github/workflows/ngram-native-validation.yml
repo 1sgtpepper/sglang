@@ -110,7 +110,7 @@ jobs:
           git apply --unidiff-zero test/ngram-native-validation/cached-miss.patch
           python test/ngram-native-validation/downstream.py patched
           python -m pytest -q test/ngram-native-validation/ffi_regression.py
-          python -m pytest -q test/registered/unit/spec/test_ngram_corpus.py
+          python -m pytest -q -rs test/registered/unit/spec/test_ngram_corpus.py
 
   compare:
     if: github.repository == '1sgtpepper/sglang'
@@ -120,6 +120,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Fetch pinned source revision
+        run: git fetch --no-tags origin bd16c22a04b0eb9bc2e775795bda6b11727a5d38
       - name: Compare correct fixes against native behavior and timing
         run: python3 test/ngram-native-validation/compare.py
       - uses: actions/upload-artifact@v4
