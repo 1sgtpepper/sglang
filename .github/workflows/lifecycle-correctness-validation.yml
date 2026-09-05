@@ -34,7 +34,7 @@ jobs:
           uv pip install --python "$(command -v python)" --only-binary :all: loguru
           uv pip install --python "$(command -v python)" --no-deps --only-binary :all: \
             sglang-kernel==0.4.6.post1 flashinfer-python==0.6.18 \
-            cuda-tile==1.6.0rc5 nvidia-cutlass-dsl==4.6.2 \
+            nvidia-cutlass-dsl==4.6.2 \
             nvidia-cutlass-dsl-libs-base==4.6.2 nvidia-cutlass-dsl-libs-cu13==4.6.2 \
             nvidia-cudnn-frontend nccl4py ninja tabulate
       - name: Inspect runtime imports
