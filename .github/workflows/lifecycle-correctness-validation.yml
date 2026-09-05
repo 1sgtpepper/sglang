@@ -1,0 +1,43 @@
+name: Lifecycle correctness validation
+
+on:
+  push:
+    branches: [validation/lifecycle-correctness]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    runs-on: [self-hosted, linux, x64, lifecycle-validation]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install import dependencies
+        run: |
+          uv pip install --python "$(command -v python)" --no-deps --only-binary :all: \
+            msgspec orjson psutil pybase64 pillow requests starlette fastapi \
+            pydantic pydantic-core annotated-types typing-inspection anyio sniffio \
+            httpx httpcore h11 certifi charset-normalizer idna urllib3 \
+            transformers==5.12.1 tokenizers==0.22.2 huggingface-hub safetensors \
+            regex pyyaml tqdm packaging typing-extensions filelock fsspec \
+            einops nvidia-ml-py torch-memory-saver uvloop uvicorn python-multipart \
+            setproctitle pyzmq gguf compressed-tensors==0.18.0 \
+            apache-tvm-ffi==0.1.11 cuda-python cuda-bindings cuda-pathfinder \
+            torchvision torchcodec xgrammar==0.2.1 llguidance outlines==0.1.11 \
+            diskcache cloudpickle jsonschema referencing rpds-py attrs \
+            scipy nest-asyncio
+      - name: Inspect runtime imports
+        env:
+          PYTHONPATH: ${{ github.workspace }}/python
+        run: |
+          python - <<'PY'
+          import torch, triton
+          print({"torch": torch.__version__, "triton": triton.__version__,
+                 "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name()})
+          from sglang.srt.mem_cache.memory_pool import MambaPool, HybridReqToTokenPool
+          from sglang.srt.beam_search.coordinator import BeamCoordinator
+          print("Production pool and beam coordinator imports passed.")
+          PY
+
