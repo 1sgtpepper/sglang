@@ -13,11 +13,20 @@ env:
   OMP_NUM_THREADS: '2'
   MKL_NUM_THREADS: '2'
 jobs:
-  build-cpu:
+  serving:
     if: github.repository == '1sgtpepper/sglang'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - name: Check required serving hardware
+        run: |
+          mkdir -p "$RUNNER_TEMP/ngram-serving-results"
+          lscpu | tee "$RUNNER_TEMP/ngram-serving-results/cpu.txt"
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          flags = Path("/proc/cpuinfo").read_text().split("flags", 1)[1].splitlines()[0].split()
+          assert {"amx_tile", "amx_bf16"}.issubset(flags), "runner lacks required AMX hardware"
+          PYCODE
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -28,6 +37,10 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: '**/pyproject_cpu.toml'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: ngram-serving-target-7ae557604adf67be50417f59c2c2f167def9a775
       - name: Select documented CPU packaging
         run: |
           cp python/pyproject_cpu.toml python/pyproject.toml
@@ -49,7 +62,7 @@ jobs:
           sudo apt-get install -y libnuma-dev numactl libgoogle-perftools-dev libtbb-dev
           uv pip install -e python 'apache-tvm-ffi==0.1.11' 'scikit-build-core>=0.10' wheel --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --prerelease allow
           lscpu
-          python -c 'import torch; print(torch.__version__, dict(torch.cpu.get_capabilities())); assert torch.version.cuda is None'
+          python -c 'import torch; print(torch.__version__, dict(torch.cpu.get_capabilities())); assert torch.version.cuda is None; assert torch.cpu._is_amx_tile_supported()'
       - uses: actions/cache/restore@v4
         id: cpu_wheel
         with:
@@ -69,70 +82,21 @@ jobs:
           uv pip install 'setuptools>=61.0' 'setuptools-rust>=1.11' 'setuptools-scm>=8.0'
           cd python
           SGLANG_BUILD_RUST_EXTS=all python setup.py build_rust --inplace
-      - name: Verify CPU backend and stage compiled modules
+      - name: Verify compiled runtime and configure serving
         run: |
           uv pip install "$RUNNER_TEMP"/cpu-wheels/*.whl
-          python -c 'import torch, sgl_kernel; assert hasattr(torch.ops.sgl_kernel, "convert_weight_packed"), "CPU kernel was not built"'
-          bash scripts/ci/utils/stage_rust_ext_modules.sh
-          mv rust-ext-staging "$RUNNER_TEMP/rust-ext-staging"
+          SGLANG_RUST_BUILD_MODE=never python - <<'PY'
+          import importlib
+          import torch
+          from sglang.srt.utils import cpu_has_amx_support
+          assert cpu_has_amx_support(), "runner cannot serve with AMX"
+          for name in ("server", "grpc", "multimodal"):
+              importlib.import_module("sglang.srt.rust_extensions._" + name)
+          importlib.import_module("sglang.srt.mem_cache.rust_tree_core.mem_cache")
+          PY
+          echo 'SGLANG_RUST_BUILD_MODE=never' >> "$GITHUB_ENV"
           git restore python/pyproject.toml python/sglang/kernels/aot/pyproject.toml
           test -z "$(git status --porcelain)"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ngram-cpu-wheels
-          path: ${{ runner.temp }}/cpu-wheels
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ngram-cpu-rust
-          path: ${{ runner.temp }}/rust-ext-staging
-          if-no-files-found: error
-          retention-days: 7
-  serving:
-    needs: build-cpu
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check required serving hardware
-        run: |
-          lscpu
-          python3 - <<'PYCODE'
-          from pathlib import Path
-          flags = Path("/proc/cpuinfo").read_text().split("flags", 1)[1].splitlines()[0].split()
-          assert {"amx_tile", "amx_bf16"}.issubset(flags), "runner lacks required AMX hardware"
-          PYCODE
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: '**/pyproject_cpu.toml'
-      - uses: ./.github/actions/download-rust-ext
-        with:
-          artifact_name: ngram-cpu-rust
-      - uses: actions/download-artifact@v4
-        with:
-          name: ngram-cpu-wheels
-          path: ${{ runner.temp }}/cpu-wheels
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface/hub
-          key: ngram-serving-target-7ae557604adf67be50417f59c2c2f167def9a775
-      - name: Install the same CPU runtime
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libnuma-dev numactl libgoogle-perftools-dev libtbb-dev
-          cp python/pyproject_cpu.toml python/pyproject.toml
-          uv pip install -e python 'apache-tvm-ffi==0.1.11' --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --prerelease allow
-          uv pip install "$RUNNER_TEMP"/cpu-wheels/*.whl
-          git restore python/pyproject.toml
-          lscpu
-          python -c 'import torch; from sglang.srt.utils import cpu_has_amx_support; print(torch.__version__, dict(torch.cpu.get_capabilities())); assert torch.version.cuda is None; assert cpu_has_amx_support(), "runner cannot serve with AMX"'
           python - <<'PY' >> "$GITHUB_ENV"
           import importlib.metadata as m
           import os
