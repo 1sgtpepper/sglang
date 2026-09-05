@@ -111,3 +111,19 @@ jobs:
           python test/ngram-native-validation/downstream.py patched
           python -m pytest -q test/ngram-native-validation/ffi_regression.py
           python -m pytest -q test/registered/unit/spec/test_ngram_corpus.py
+
+  compare:
+    if: github.repository == '1sgtpepper/sglang'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare correct fixes against native behavior and timing
+        run: python3 test/ngram-native-validation/compare.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ngram-fix-comparison
+          path: comparison-results/comparison.json
+          if-no-files-found: error
