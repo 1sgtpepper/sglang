@@ -1,0 +1,139 @@
+name: NGRAM CPU serving validation
+on:
+  push:
+    branches: [validation/ngram-cpu-serving]
+permissions:
+  contents: read
+env:
+  SGLANG_USE_CPU_ENGINE: '1'
+  UV_SYSTEM_PYTHON: '1'
+  CARGO_BUILD_JOBS: '2'
+  CMAKE_BUILD_PARALLEL_LEVEL: '1'
+  MAX_JOBS: '2'
+  OMP_NUM_THREADS: '2'
+  MKL_NUM_THREADS: '2'
+jobs:
+  build-cpu:
+    if: github.repository == '1sgtpepper/sglang'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: '**/pyproject_cpu.toml'
+      - name: Select documented CPU packaging
+        run: |
+          cp python/pyproject_cpu.toml python/pyproject.toml
+          cp python/sglang/kernels/aot/pyproject_cpu.toml python/sglang/kernels/aot/pyproject.toml
+      - uses: ./.github/actions/download-rust-ext
+        id: rust_ext
+      - name: Install Rust toolchain on cache miss
+        if: steps.rust_ext.outputs.hit != 'true'
+        run: bash scripts/ci/utils/install_rust_protoc.sh
+      - uses: Swatinem/rust-cache@v2
+        if: steps.rust_ext.outputs.hit != 'true'
+        with:
+          workspaces: rust
+          shared-key: sglang-ngram-cpu-torch212
+          cache-on-failure: true
+      - name: Install CPU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnuma-dev numactl libgoogle-perftools-dev libtbb-dev
+          uv pip install -e python 'apache-tvm-ffi==0.1.11' 'scikit-build-core>=0.10' wheel --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --prerelease allow
+          python -c 'import torch; print(torch.__version__); assert torch.version.cuda is None; assert torch.cpu._is_amx_tile_supported(), "runner does not expose AMX"'
+      - uses: actions/cache@v4
+        id: cpu_wheel
+        with:
+          path: ${{ runner.temp }}/cpu-wheels
+          key: ngram-cpu-cp310-torch212-${{ hashFiles('python/sglang/kernels/aot/csrc/cpu/**', 'python/sglang/kernels/aot/include/**', 'python/sglang/kernels/aot/python/**', 'python/sglang/kernels/aot/pyproject_cpu.toml') }}
+      - name: Build the unchanged CPU kernel package
+        if: steps.cpu_wheel.outputs.cache-hit != 'true'
+        run: uv build --wheel --no-build-isolation --out-dir "$RUNNER_TEMP/cpu-wheels" python/sglang/kernels/aot
+      - name: Verify CPU backend and stage compiled modules
+        run: |
+          uv pip install "$RUNNER_TEMP"/cpu-wheels/*.whl
+          python -c 'from sglang.srt.utils import cpu_has_amx_support; assert cpu_has_amx_support(), "real AMX backend is unavailable"'
+          bash scripts/ci/utils/stage_rust_ext_modules.sh
+          mv rust-ext-staging "$RUNNER_TEMP/rust-ext-staging"
+          git restore python/pyproject.toml python/sglang/kernels/aot/pyproject.toml
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ngram-cpu-wheels
+          path: ${{ runner.temp }}/cpu-wheels
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ngram-cpu-rust
+          path: ${{ runner.temp }}/rust-ext-staging
+          if-no-files-found: error
+          retention-days: 7
+  serving:
+    needs: build-cpu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: '**/pyproject_cpu.toml'
+      - uses: ./.github/actions/download-rust-ext
+        with:
+          artifact_name: ngram-cpu-rust
+      - uses: actions/download-artifact@v4
+        with:
+          name: ngram-cpu-wheels
+          path: ${{ runner.temp }}/cpu-wheels
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: ngram-serving-target-7ae557604adf67be50417f59c2c2f167def9a775
+      - name: Install the same CPU runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnuma-dev numactl libgoogle-perftools-dev libtbb-dev
+          cp python/pyproject_cpu.toml python/pyproject.toml
+          uv pip install -e python 'apache-tvm-ffi==0.1.11' --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --prerelease allow
+          uv pip install "$RUNNER_TEMP"/cpu-wheels/*.whl
+          git restore python/pyproject.toml
+          python -c 'import torch; from sglang.srt.utils import cpu_has_amx_support; assert torch.version.cuda is None; assert cpu_has_amx_support(), "runner cannot serve with AMX"'
+          python - <<'PY' >> "$GITHUB_ENV"
+          import importlib.metadata as m
+          import os
+          libraries = [str(m.distribution("intel-openmp").locate_file(p).resolve()) for p in m.files("intel-openmp") if p.name == "libiomp5.so"]
+          assert len(libraries) == 1, libraries
+          print("LD_PRELOAD=" + libraries[0] + ":/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4:/usr/lib/x86_64-linux-gnu/libtbbmalloc.so.2")
+          print("SGLANG_CPU_OMP_THREADS_BIND=" + ",".join(map(str, sorted(os.sched_getaffinity(0))[:2])))
+          PY
+      - name: Run matched serving accuracy, speed and profiling
+        run: |
+          set -euo pipefail
+          cp -a test/ngram-cpu-serving "$RUNNER_TEMP/ngram-serving-harness"
+          mkdir -p "$RUNNER_TEMP/ngram-serving-results"
+          lscpu > "$RUNNER_TEMP/ngram-serving-results/cpu.txt"
+          python -m pip freeze > "$RUNNER_TEMP/ngram-serving-results/dependencies.txt"
+          git fetch --no-tags origin bd16c22a04b0eb9bc2e775795bda6b11727a5d38 17b250829c15b11563c0ff6098c97962ec6c2aa7
+          python "$RUNNER_TEMP/ngram-serving-harness/serving.py" "$RUNNER_TEMP/ngram-serving-results"
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ngram-cpu-serving-results
+          path: ${{ runner.temp }}/ngram-serving-results
+          if-no-files-found: error
+          retention-days: 7
