@@ -228,6 +228,12 @@ def test_custom_all_reduce(
         # while triton's converts to numpy on the host (~0.6 s per 32 MB
         # tensor) and would dominate the test wall time.
         torch.testing.assert_close(out_ref, out_jit, atol=0, rtol=0)
+        if use_graph and algo == AllReduceAlgo.TWO_SHOT_PULL:
+            # Graph-mode CARv2 is selected through the out-of-place custom-op
+            # contract. The collective result must therefore not alias or mutate
+            # its input even when the optimized kernel uses registered graph
+            # buffers internally.
+            torch.testing.assert_close(inp, graph_inp, atol=0, rtol=0)
 
 
 if __name__ == "__main__":
