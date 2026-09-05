@@ -101,6 +101,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          candidate=17b250829c15b11563c0ff6098c97962ec6c2aa7
+          git fetch --no-tags origin "$candidate"
+          git show "$candidate:test/registered/unit/spec/test_ngram_corpus.py" > test/registered/unit/spec/test_ngram_corpus.py
+          status=0
+          python -m pytest -q test/registered/unit/spec/test_ngram_corpus.py::TestNgramCorpusIncremental::test_cached_miss_becomes_match_after_insert > /tmp/candidate-baseline.log 2>&1 || status=$?
+          cat /tmp/candidate-baseline.log
+          test "$status" -eq 1
+          grep -F 'Arrays are not equal' /tmp/candidate-baseline.log
           python test/ngram-native-validation/downstream.py baseline
           status=0
           python -m pytest -q test/ngram-native-validation/ffi_regression.py > /tmp/baseline-ffi.log 2>&1 || status=$?
@@ -110,7 +118,18 @@ jobs:
           git apply --unidiff-zero test/ngram-native-validation/cached-miss.patch
           python test/ngram-native-validation/downstream.py patched
           python -m pytest -q test/ngram-native-validation/ffi_regression.py
+          cp -a test/ngram-native-validation "$RUNNER_TEMP/ngram-final-harness"
+          git checkout --force --detach "$candidate"
+          test "$(git rev-parse HEAD)" = "$candidate"
           python -m pytest -q -rs test/registered/unit/spec/test_ngram_corpus.py
+          python "$RUNNER_TEMP/ngram-final-harness/downstream.py" patched
+          src=python/sglang/kernels/jit/csrc/ngram_corpus
+          clang++ -std=c++20 -O1 -g -pthread -fsanitize=address,undefined \
+            -fno-sanitize-recover=all -fno-omit-frame-pointer -I "$src" \
+            "$RUNNER_TEMP/ngram-final-harness/regression.cc" "$src/ngram.cpp" \
+            "$src/trie.cpp" "$src/result.cpp" "$src/suffix_automaton.cpp" \
+            -o /tmp/ngram-final-sanitized
+          timeout 60 /tmp/ngram-final-sanitized
 
   compare:
     if: github.repository == '1sgtpepper/sglang'

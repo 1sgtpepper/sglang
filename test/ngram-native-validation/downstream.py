@@ -56,7 +56,7 @@ def verify(ids, mask, target, width):
 def main():
     variant = sys.argv[1]
     assert variant in ("baseline", "patched")
-    root = Path(__file__).resolve().parents[2]
+    root = Path.cwd()
     load(
         name="ngram_verification_validation",
         sources=[

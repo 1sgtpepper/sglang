@@ -11,17 +11,23 @@ int main() {
     p.match_type = mode;
     Ngram corpus(10000, p);
     corpus.batchMatch({1}, {{10, 20}}, {2});
-    corpus.asyncInsert({{10, 20, 30, 40, 50, 60}, {30, 70, 80, 90}, {30, 70, 80, 90}});
+    corpus.asyncInsert(
+        {{10, 20, 30, 40, 50, 60}, {30, 70, 80, 90}, {30, 70, 80, 90}});
     corpus.synchronize();
     auto cached = corpus.batchMatch({1}, {{10, 20, 30}}, {3});
     auto fresh = corpus.batchMatch({2}, {{10, 20, 30}}, {3});
     std::cout << mode << " cached=";
-    for (int token : cached.token) std::cout << token << ',';
+    for (int token : cached.token)
+      std::cout << token << ',';
     std::cout << " fresh=";
-    for (int token : fresh.token) std::cout << token << ',';
+    for (int token : fresh.token)
+      std::cout << token << ',';
     const bool pass = cached.token == std::vector<int32_t>{30, 40, 50, 60} &&
                       cached.token == fresh.token && cached.mask == fresh.mask;
-    std::cout << " " << (pass ? "PASS" : "FAIL: newly inserted longest match is omitted") << '\n';
+    std::cout << " "
+              << (pass ? "PASS"
+                       : "FAIL: newly inserted longest match is omitted")
+              << '\n';
     ok &= pass;
   }
   return ok ? 0 : 1;

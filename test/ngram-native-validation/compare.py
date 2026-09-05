@@ -126,6 +126,61 @@ def main():
                     run([str(binary), variant])
                 else:
                     binaries[variant] = binary
+        # Rebuild counts run in a separate instrumented copy, after all timing
+        # executables were linked against uninstrumented production objects.
+        tree = tmp / "growth"
+        source = tree / NATIVE
+        cpp = source / "trie.cpp"
+        production = cpp.read_text()
+        entry = "void Trie::rebuildMatchState_(const int32_t* context, size_t len, MatchState& state, size_t total_len) const {"
+        instrumented = (
+            "#include <cstddef>\nextern size_t validation_rebuild_count;\n"
+            + replace_once(
+                production, entry, entry + "\n  ++::validation_rebuild_count;"
+            )
+        )
+        for mutation in (False, True):
+            text = instrumented
+            if mutation:
+                text = replace_once(
+                    text,
+                    "  state.processed_total_len = total_len;\n  state.growth_epoch = growth_epoch_;\n  return true;",
+                    "  state.processed_total_len = total_len;\n  return true;",
+                )
+            diagnostic = tree / "diagnostic.cpp"
+            diagnostic.write_text(text)
+            binary = tree / "rebuild-counts"
+            objects = [
+                str(tree / (name + ".o"))
+                for name in ("ngram", "result", "suffix_automaton")
+            ]
+            run(
+                [
+                    "g++",
+                    "-std=c++20",
+                    "-O3",
+                    "-pthread",
+                    "-I",
+                    str(source),
+                    str(TESTS / "rebuild_counts.cc"),
+                    str(diagnostic),
+                    *objects,
+                    "-o",
+                    str(binary),
+                ]
+            )
+            if mutation:
+                result = subprocess.run(
+                    [str(binary)], capture_output=True, text=True, timeout=30
+                )
+                assert result.returncode != 0
+                assert "advance failed to refresh miss provenance" in result.stderr
+                print(
+                    "Missing advance epoch update: rebuild-count control caught regression",
+                    flush=True,
+                )
+            else:
+                run([str(binary)])
         # Warm each executable once; retain seven interleaved measurements.
         for variant in variants:
             run([str(binaries[variant]), variant])
