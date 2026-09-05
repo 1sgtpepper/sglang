@@ -28,7 +28,7 @@ PROMPTS = (
 def check_model(variant, output):
     import torch
     from torch.utils.cpp_extension import load
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
     torch.set_num_threads(2)
     torch.manual_seed(0)
@@ -49,17 +49,23 @@ def check_model(variant, output):
         attn_implementation="eager",
         use_safetensors=True,
     ).eval()
+    # The checkpoint's repetition penalty changes raw greedy predictions.
+    generation = GenerationConfig(
+        max_new_tokens=4,
+        do_sample=False,
+        use_cache=False,
+        repetition_penalty=1.0,
+        eos_token_id=None,
+        pad_token_id=tokenizer.eos_token_id,
+    )
     rows = []
     with torch.inference_mode():
         for prompt_id, prompt in enumerate(PROMPTS):
             prefix = tokenizer.encode(prompt)
             reference = model.generate(
                 torch.tensor([prefix]),
-                max_new_tokens=4,
-                min_new_tokens=4,
-                do_sample=False,
-                use_cache=False,
-                pad_token_id=tokenizer.eos_token_id,
+                attention_mask=torch.ones((1, len(prefix)), dtype=torch.int64),
+                generation_config=generation,
             )[0, len(prefix) :].tolist()
             for mode in ("BFS", "PROB"):
                 # A different first token guarantees rejection of the short branch.
@@ -157,6 +163,7 @@ def check_model(variant, output):
                 model=MODEL,
                 revision=REVISION,
                 variant=variant,
+                generation=generation.to_diff_dict(),
                 prompts=PROMPTS,
                 cases=rows,
             ),

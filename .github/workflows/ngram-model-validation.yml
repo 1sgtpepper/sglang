@@ -30,9 +30,13 @@ jobs:
         with:
           path: ~/.cache/huggingface/hub
           key: ngram-target-7ae557604adf67be50417f59c2c2f167def9a775
+      - uses: ./.github/actions/download-rust-ext
+        id: rust_ext
+      - name: Install Rust toolchain on cache miss
+        if: steps.rust_ext.outputs.hit != 'true'
+        run: bash scripts/ci/utils/install_rust_protoc.sh
       - name: Install repository dependencies
         run: |
-          bash scripts/ci/utils/install_rust_protoc.sh
           uv pip install -e "python[dev]" --index-strategy unsafe-best-match --prerelease allow
       - name: Verify real-model predictions and profile the CPU path
         shell: bash
