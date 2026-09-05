@@ -1,0 +1,73 @@
+name: NGRAM native validation
+on:
+  push:
+    branches: [validation/ngram-cached-miss]
+permissions:
+  contents: read
+jobs:
+  native:
+    if: github.repository == '1sgtpepper/sglang'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Replay baseline and patched native behavior
+        env:
+          CXX: ${{ matrix.compiler }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$CXX" --version
+          src=python/sglang/kernels/jit/csrc/ngram_corpus
+          tests=test/ngram-native-validation
+          mkdir -p /tmp/ngram-validation
+          for variant in baseline patched; do
+            if [[ "$variant" == patched ]]; then
+              git apply --check "$tests/cached-miss.patch"
+              git apply "$tests/cached-miss.patch"
+            fi
+            for test in runtime_repro regression; do
+              binary="/tmp/ngram-validation/$variant-$test"
+              "$CXX" -std=c++20 -O2 -pthread -I "$src" \
+                "$tests/$test.cc" "$src/ngram.cpp" "$src/trie.cpp" \
+                "$src/result.cpp" "$src/suffix_automaton.cpp" -o "$binary"
+              status=0
+              timeout 60 "$binary" > "$binary.log" 2>&1 || status=$?
+              cat "$binary.log"
+              if [[ "$variant" == baseline ]]; then
+                test "$status" -eq 1
+                if [[ "$test" == runtime_repro ]]; then
+                  grep -Fx 'BFS cached=30,70,80,90, fresh=30,40,50,60, FAIL: newly inserted longest match is omitted' "$binary.log"
+                  grep -Fx 'PROB cached=30,70,80,90, fresh=30,40,50,60, FAIL: newly inserted longest match is omitted' "$binary.log"
+                else
+                  grep -Fx 'checks=33500 failures=2790' "$binary.log"
+                fi
+              else
+                test "$status" -eq 0
+                if [[ "$test" == runtime_repro ]]; then
+                  grep -Fx 'BFS cached=30,40,50,60, fresh=30,40,50,60, PASS' "$binary.log"
+                  grep -Fx 'PROB cached=30,40,50,60, fresh=30,40,50,60, PASS' "$binary.log"
+                else
+                  grep -Fx 'checks=35352 failures=0' "$binary.log"
+                fi
+              fi
+            done
+          done
+      - name: Check patched native behavior with sanitizers
+        if: matrix.compiler == 'clang++'
+        shell: bash
+        run: |
+          set -euo pipefail
+          src=python/sglang/kernels/jit/csrc/ngram_corpus
+          clang++ -std=c++20 -O1 -g -pthread -fsanitize=address,undefined \
+            -fno-sanitize-recover=all -fno-omit-frame-pointer -I "$src" \
+            test/ngram-native-validation/regression.cc "$src/ngram.cpp" \
+            "$src/trie.cpp" "$src/result.cpp" "$src/suffix_automaton.cpp" \
+            -o /tmp/ngram-validation/sanitized
+          timeout 60 /tmp/ngram-validation/sanitized
