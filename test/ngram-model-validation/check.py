@@ -62,6 +62,7 @@ def check_model(variant, output):
     with torch.inference_mode():
         for prompt_id, prompt in enumerate(PROMPTS):
             prefix = tokenizer.encode(prompt)
+            assert len(prefix) + 4 <= 64
             reference = model.generate(
                 torch.tensor([prefix]),
                 attention_mask=torch.ones((1, len(prefix)), dtype=torch.int64),
@@ -71,16 +72,16 @@ def check_model(variant, output):
                 # A different first token guarantees rejection of the short branch.
                 conflict = (reference[0] + 1) % model.config.vocab_size
                 corpus = NgramCorpus(
-                    max_trie_depth=18,
+                    max_trie_depth=64,
                     min_bfs_breadth=1,
                     max_bfs_breadth=1,
                     draft_token_num=4,
                     match_type=mode,
                     capacity=10000,
                 )
-                corpus.batch_get(["cached"], [prefix[-4:-1]], [len(prefix) - 1])
+                corpus.batch_get(["cached"], [prefix[:-1]], [len(prefix) - 1])
                 corpus.batch_put(
-                    [prefix[-4:] + reference]
+                    [prefix + reference]
                     + [[prefix[-1], conflict, conflict, conflict]] * 2
                 )
                 corpus.synchronize()
@@ -90,7 +91,7 @@ def check_model(variant, output):
                 ) as profile:
                     with torch.profiler.record_function("ngram_match"):
                         ids, masks = corpus.batch_get(
-                            ["cached", "fresh"], [prefix[-4:]] * 2, [len(prefix)] * 2
+                            ["cached", "fresh"], [prefix] * 2, [len(prefix)] * 2
                         )
                     candidates = torch.tensor(ids, dtype=torch.int64).reshape(2, 4)
                     np.testing.assert_array_equal(
@@ -149,6 +150,7 @@ def check_model(variant, output):
                         emitted=emitted,
                     )
                 )
+                print(json.dumps(rows[-1]), flush=True)
                 if prompt_id == 0 and mode == "BFS":
                     profile.export_chrome_trace(str(output / f"{variant}-profile.json"))
                     (output / f"{variant}-profile.txt").write_text(
