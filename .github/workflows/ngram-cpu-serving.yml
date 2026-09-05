@@ -50,7 +50,7 @@ jobs:
           uv pip install -e python 'apache-tvm-ffi==0.1.11' 'scikit-build-core>=0.10' wheel --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --prerelease allow
           lscpu
           python -c 'import torch; print(torch.__version__, dict(torch.cpu.get_capabilities())); assert torch.version.cuda is None'
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         id: cpu_wheel
         with:
           path: ${{ runner.temp }}/cpu-wheels
@@ -58,6 +58,17 @@ jobs:
       - name: Build the unchanged CPU kernel package
         if: steps.cpu_wheel.outputs.cache-hit != 'true'
         run: uv build --wheel --no-build-isolation --out-dir "$RUNNER_TEMP/cpu-wheels" python/sglang/kernels/aot
+      - uses: actions/cache/save@v4
+        if: steps.cpu_wheel.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/cpu-wheels
+          key: ${{ steps.cpu_wheel.outputs.cache-primary-key }}
+      - name: Build missing Rust modules with the CPU runtime
+        if: steps.rust_ext.outputs.hit != 'true'
+        run: |
+          uv pip install 'setuptools>=61.0' 'setuptools-rust>=1.11' 'setuptools-scm>=8.0'
+          cd python
+          SGLANG_BUILD_RUST_EXTS=all python setup.py build_rust --inplace
       - name: Verify CPU backend and stage compiled modules
         run: |
           uv pip install "$RUNNER_TEMP"/cpu-wheels/*.whl
@@ -83,6 +94,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - name: Check required serving hardware
+        run: |
+          lscpu
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          flags = Path("/proc/cpuinfo").read_text().split("flags", 1)[1].splitlines()[0].split()
+          assert {"amx_tile", "amx_bf16"}.issubset(flags), "runner lacks required AMX hardware"
+          PYCODE
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
