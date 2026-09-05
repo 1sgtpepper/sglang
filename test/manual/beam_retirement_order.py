@@ -6,8 +6,10 @@ The production scheduler barrier and beam commit/cleanup then run on a separate
 stream. This is a component integration test, not a model-serving test.
 """
 
+import faulthandler
 import json
 import os
+import threading
 from array import array
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -62,6 +64,7 @@ def fixture():
 
 
 def run(mode):
+    print(json.dumps({"mode": mode, "phase": "fixture"}), flush=True)
     forward, schedule, release = torch.cuda.Stream(), torch.cuda.Stream(), torch.cuda.Stream()
     parent = torch.tensor([0, 0], device="cuda", dtype=torch.int64)
     tokens = torch.tensor([12, 13], device="cuda", dtype=torch.int64)
@@ -102,6 +105,14 @@ def run(mode):
     torch.cuda.synchronize()
     pending = []
     held = False
+    rescued = threading.Event()
+
+    def rescue():
+        rescued.set()
+        with torch.cuda.stream(release):
+            gate.fill_(1)
+
+    timer = threading.Timer(15, rescue)
     try:
         with torch.cuda.stream(forward):
             graph.replay()
@@ -112,16 +123,20 @@ def run(mode):
             )
             assert status == driver.CUresult.CUDA_SUCCESS, status
             held = True
+            timer.start()
+            print(json.dumps({"mode": mode, "phase": "gate installed"}), flush=True)
             coordinator._apply_survivors(
                 group, tokens, None if mode == "final" else parent, 2,
             )
             pending = list(group.pending_orphans)
+            print(json.dumps({"mode": mode, "phase": "remap submitted"}), flush=True)
             finished.record()
             if mode == "late":
                 graph_owner.model_runner.shared_read_done_event = finished
 
         with patch.dict(os.environ, {"SGLANG_FORCE_COARSE_WAR_BARRIER": "1" if mode == "coarse" else "0"}):
             Scheduler._apply_war_barrier(scheduler)
+        print(json.dumps({"mode": mode, "phase": "barrier submitted"}), flush=True)
 
         if mode in ("coarse", "late"):
             # The scheduler already waits for the remap. Open the deterministic
@@ -138,6 +153,7 @@ def run(mode):
             if mode == "ordinary":
                 leader.to_finish = None
             coordinator.commit_decode(SimpleNamespace(reqs=[leader], forward_iter=1))
+            print(json.dumps({"mode": mode, "phase": "commit returned"}), flush=True)
             schedule.synchronize()
             retired_before_completion = group.retired and not finished.query()
             if mode == "ordinary":
@@ -175,10 +191,12 @@ def run(mode):
             replacement_preserved=expected_mapping == observed_mapping,
             idempotent_retire=True,
             initial_free_count=len(initial_free), final_free_count=len(free_after_repeat),
+            watchdog_released_gate=rescued.is_set(),
         )
         print(json.dumps(result), flush=True)
         return result
     finally:
+        timer.cancel()
         if held:
             with torch.cuda.stream(release):
                 gate.fill_(1)
@@ -186,8 +204,9 @@ def run(mode):
 
 
 if __name__ == "__main__":
+    faulthandler.dump_traceback_later(10, repeat=False)
     results = [run(mode) for mode in ("early", "coarse", "late", "ordinary", "final")]
+    faulthandler.cancel_dump_traceback_later()
     assert results[0]["retired_before_remap_completed"]
     assert not results[0]["replacement_preserved"]
     assert all(result["replacement_preserved"] for result in results[1:])
-
