@@ -190,7 +190,7 @@ def benchmark(variant, trial, output):
         )
         corpus.batch_put([list(range(1, 32))])
         corpus.synchronize()
-        context = list(range(1, 19)) if live else [20001, 20002, 20003]
+        context = list(range(1, 19)) if live else list(range(20001, 20019))
         keys = [str(i) for i in range(batch_size)]
         inputs = [context] * batch_size
         lengths = [len(context)] * batch_size
