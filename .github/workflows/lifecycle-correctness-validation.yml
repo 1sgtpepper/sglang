@@ -53,3 +53,8 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/python
         run: python test/manual/replayssm_retraction.py
+      - name: Check beam retirement ordering
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/python
+        run: python test/manual/beam_retirement_order.py
