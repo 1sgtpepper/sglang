@@ -73,6 +73,7 @@ def run(mode):
     # keeps cudaMalloc/module initialization from providing incidental fences.
     for _ in range(3):
         p, a, leader, g, c = fixture()
+        forward.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(forward):
             c._apply_survivors(g, tokens, parent, 2)
         schedule.wait_stream(forward)
