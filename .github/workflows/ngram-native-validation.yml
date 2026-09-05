@@ -102,6 +102,18 @@ jobs:
         run: |
           set -euo pipefail
           candidate=17b250829c15b11563c0ff6098c97962ec6c2aa7
+          environment_status=0
+          python -m sglang.check_env > /tmp/ngram-environment.log 2>&1 || environment_status=$?
+          echo "Environment probe exit: $environment_status"
+          cat /tmp/ngram-environment.log
+          python -c 'import importlib.metadata as m, platform; print("Runtime:", platform.platform(), platform.python_version()); print({p: m.version(p) for p in ("sglang", "torch", "apache-tvm-ffi", "numpy")})'
+          status=0
+          python test/ngram-native-validation/issue_repro.py > /tmp/issue-baseline.log 2>&1 || status=$?
+          cat /tmp/issue-baseline.log
+          test "$status" -eq 1
+          grep -Fx 'BFS: cached=[30, 70, 80, 90], fresh=[30, 40, 50, 60], after_erasure=[30, 40, 50, 60]' /tmp/issue-baseline.log
+          grep -Fx 'PROB: cached=[30, 70, 80, 90], fresh=[30, 40, 50, 60], after_erasure=[30, 40, 50, 60]' /tmp/issue-baseline.log
+          grep -Fx 'AssertionError: cached request omits newly inserted longer context' /tmp/issue-baseline.log
           git fetch --no-tags origin "$candidate"
           git show "$candidate:test/registered/unit/spec/test_ngram_corpus.py" > test/registered/unit/spec/test_ngram_corpus.py
           status=0
@@ -121,6 +133,7 @@ jobs:
           cp -a test/ngram-native-validation "$RUNNER_TEMP/ngram-final-harness"
           git checkout --force --detach "$candidate"
           test "$(git rev-parse HEAD)" = "$candidate"
+          python "$RUNNER_TEMP/ngram-final-harness/issue_repro.py"
           python -m pytest -q -rs test/registered/unit/spec/test_ngram_corpus.py
           python "$RUNNER_TEMP/ngram-final-harness/downstream.py" patched
           src=python/sglang/kernels/jit/csrc/ngram_corpus
