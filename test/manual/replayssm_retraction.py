@@ -29,10 +29,11 @@ from sglang.srt.configs.mamba_utils import (
     Mamba2StateDType,
     Mamba2StateShape,
 )
+from sglang.srt.disaggregation.decode import HybridMambaDecodeReqToTokenPool
 from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.mem_cache.allocator.token import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.common import retraction_backup, retraction_restore
-from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool, HybridReqToTokenPool
+from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
 from sglang.srt.sampling.sampling_params import SamplingParams
 
 
@@ -81,10 +82,11 @@ def make_case(dtype, width, ring_len, carries_mamba):
         state_size=128,
         conv_kernel=4,
     )
-    pool = HybridReqToTokenPool(
+    pool = HybridMambaDecodeReqToTokenPool(
         size=4,
         mamba_size=8,
-        mamba_spec_state_size=4,
+        pre_alloc_size=1,
+        enable_overlap_schedule=False,
         max_context_len=128,
         device="cuda",
         enable_memory_saver=False,
