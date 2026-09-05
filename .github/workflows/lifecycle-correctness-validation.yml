@@ -31,7 +31,7 @@ jobs:
           uv pip install --python "$(command -v python)" --only-binary :all: \
             ipython aiohttp anthropic openai==2.6.1 partial-json-parser \
             prometheus-client interegular sentencepiece tiktoken
-          uv pip install --python "$(command -v python)" --only-binary :all: loguru
+          uv pip install --python "$(command -v python)" --only-binary :all: loguru click protobuf xxhash
           uv pip install --python "$(command -v python)" --no-deps --only-binary :all: \
             sglang-kernel==0.4.6.post1 flashinfer-python==0.6.18 \
             nvidia-cutlass-dsl==4.6.2 \

@@ -65,7 +65,7 @@ def inputs(width, seed):
     )
 
 
-def make_case(dtype, width):
+def make_case(dtype, width, ring_len, carries_mamba):
     shape = Mamba2StateShape.create(
         tp_world_size=1, intermediate_size=512, n_groups=2, num_heads=4,
         head_dim=128, state_size=128, conv_kernel=4,
@@ -79,14 +79,15 @@ def make_case(dtype, width):
         ),
         mamba_layer_ids=[0, 1], enable_mamba_extra_buffer=False,
         speculative_num_draft_tokens=width, speculative_eagle_topk=1,
-        enable_linear_replayssm_spec=True, linear_replayssm_cache_len=16,
+        enable_linear_replayssm_spec=True, linear_replayssm_cache_len=ring_len,
     )
     kv = HybridLinearKVPool(
         size=128, dtype=torch.bfloat16, page_size=1, head_num=1, head_dim=64,
         full_attention_layer_ids=[2], device="cuda", mamba_pool=pool.mamba_pool,
     )
     allocator = TokenToKVPoolAllocator(
-        size=128, dtype=torch.bfloat16, device="cuda", kvcache=kv, need_sort=False,
+        size=128, dtype=torch.bfloat16, device="cuda",
+        kvcache=kv if carries_mamba else kv.full_kv_pool, need_sort=False,
     )
     req = Req("retraction", "", array("q", [1, 2, 3]), SamplingParams(max_new_tokens=100))
     req.output_ids.append(4)
@@ -112,7 +113,8 @@ def verify(req, pool, values, width):
             ssm_state_indices=req.kv.mamba_pool_idx.reshape(1),
             replay_indices=torch.tensor([req.kv.req_pool_idx], device="cuda", dtype=torch.int64),
             write_pos=mp.replayssm_spec_write_pos, cache_base=mp.replayssm_cache_base,
-            is_flush=mp.replayssm_is_flush, max_cache_len=16, max_spec_len=width,
+            is_flush=mp.replayssm_is_flush,
+            max_cache_len=mp.linear_replayssm_cache_len, max_spec_len=width,
             null_block_id=-1, launch_mode="verify",
         )
         output.append(out)
@@ -142,14 +144,14 @@ def commit(req, pool, width, accepted):
         is_flush=mp.replayssm_is_flush,
         num_accepted=torch.tensor([accepted], device="cuda", dtype=torch.int32),
         replay_indices=torch.tensor([req.kv.req_pool_idx], device="cuda", dtype=torch.int64),
-        max_cache_len=16, max_spec_len=width,
+        max_cache_len=mp.linear_replayssm_cache_len, max_spec_len=width,
         fold_every_commit=mp.mamba_cache.temporal.dtype != torch.float32, null_block_id=-1,
     )
     fold(req, pool, accepted)
     req.output_ids.extend(range(accepted))
 
 
-def roundtrip(req, pool, allocator, materialize):
+def roundtrip(req, pool, allocator, materialize, move_row, reuse_state):
     mp = pool.mamba_pool
     old_req, old_state = req.kv.req_pool_idx, int(req.kv.mamba_pool_idx)
     if materialize:
@@ -157,19 +159,34 @@ def roundtrip(req, pool, allocator, materialize):
         mp.replayssm_is_flush[old_req] = 1
         fold(req, pool, 0)
     n = req.seqlen - 1
-    slots = allocator.alloc(n)
+    previous = req.kv.kv_allocated_len
+    slots = torch.cat((
+        pool.req_to_token[old_req, :previous].to(torch.int64),
+        allocator.alloc(n - previous),
+    ))
     pool.write((old_req, slice(0, n)), slots.to(torch.int32))
     req.kv.kv_allocated_len = req.kv.kv_committed_len = n
-    kv = allocator.get_kvcache().full_kv_pool
+    kv = allocator.get_kvcache()
+    kv = getattr(kv, "full_kv_pool", kv)
     kv.k_buffer[0][slots] = 0.25
     kv.v_buffer[0][slots] = 0.75
     mp.mamba_cache.conv[0][:, old_state] = 0.5
     assert retraction_backup(req, None, pool, allocator, "cpu_tensor")
+    held_states = None
+    if reuse_state:
+        held_states = pool.mamba_allocator.alloc(pool.mamba_allocator.available_size())
     allocator.free(slots)
     pool.free_mamba_cache(req)
     pool.free(req)
     req.reset_for_retract()
+    held_row = pool.alloc_rows(1) if move_row else []
     pool.alloc([req])
+    if reuse_state:
+        assert int(req.kv.mamba_pool_idx) == old_state
+        pool.mamba_allocator.free(held_states)
+    if move_row:
+        assert req.kv.req_pool_idx != old_req
+        pool.free_rows(held_row)
     slots = allocator.alloc(n)
     pool.write((req.kv.req_pool_idx, slice(0, n)), slots.to(torch.int32))
     req.kv.kv_allocated_len = req.kv.kv_committed_len = n
@@ -187,8 +204,9 @@ def roundtrip(req, pool, allocator, materialize):
     return [old_req, old_state], [req.kv.req_pool_idx, int(req.kv.mamba_pool_idx)]
 
 
-def run(dtype, width, accepted, materialize, rounds):
-    req, pool, allocator = make_case(dtype, width)
+def run(dtype, width, accepted, materialize, rounds, ring_len=16,
+        carries_mamba=True, move_row=False, reuse_state=False):
+    req, pool, allocator = make_case(dtype, width, ring_len, carries_mamba)
     expected_state = torch.zeros(4, 128, 128, dtype=torch.float64)
     errors, identities, pending = [], [], []
     for iteration in range(rounds):
@@ -205,18 +223,20 @@ def run(dtype, width, accepted, materialize, rounds):
         oracle_error = float((uninterrupted - expected.unsqueeze(0)).abs().max())
         # This tolerance is checked against the independent recurrence before
         # the lifecycle comparison, so rounding cannot explain a large loss.
-        assert oracle_error < 0.004, oracle_error
-        identities.append(roundtrip(req, pool, allocator, materialize))
+        assert oracle_error < 0.001, oracle_error
+        identities.append(roundtrip(req, pool, allocator, materialize, move_row, reuse_state))
         restored = verify(req, pool, next_data, width).cpu().double()
         delta = float((restored - uninterrupted).abs().max())
         errors.append({"oracle_error": oracle_error, "restore_delta": delta})
         if not materialize and dtype == torch.float32 and pending[-1] > 0:
-            # Continue after the first divergent case with the explicit repair,
-            # so repeated lifecycle coverage measures each transition separately.
+            # A lossy baseline cannot supply the intended recurrence to another
+            # round. Repeated transitions are measured by the preserving cases.
             break
     result = dict(dtype=str(dtype), width=width, accepted=accepted, rounds=rounds,
+                  ring_len=ring_len, carries_mamba=carries_mamba,
+                  move_row=move_row, reuse_state=reuse_state,
                   materialize=materialize, pending=pending, identities=identities, errors=errors)
-    result["preserved"] = all(e["restore_delta"] < 0.004 for e in errors)
+    result["preserved"] = all(e["restore_delta"] < 0.001 for e in errors)
     print(json.dumps(result), flush=True)
     return result
 
@@ -229,11 +249,24 @@ if __name__ == "__main__":
         (torch.float32, 6, 3),
         (torch.float32, 6, 4),
         (torch.float32, 6, 5),
+        (torch.float32, 6, 6),
         (torch.float32, 8, 3),
         (torch.bfloat16, 6, 3),
     ]:
         for materialize in [False, True]:
             results.append(run(dtype, width, accepted, materialize, 1))
+    for materialize in [False, True]:
+        results.append(run(torch.float32, 8, 8, materialize, 1, ring_len=32))
+        for carries_mamba, move_row, reuse_state in [
+            (True, True, False), (True, False, True), (True, True, True),
+            (False, False, False), (False, True, True),
+        ]:
+            results.append(run(
+                torch.float32, 6, 3, materialize, 3,
+                carries_mamba=carries_mamba, move_row=move_row, reuse_state=reuse_state,
+            ))
+    results.append(run(torch.bfloat16, 6, 3, False, 3, move_row=True, reuse_state=True))
+    results.append(run(torch.float32, 8, 3, False, 3, move_row=True, reuse_state=True))
     print(json.dumps({"baseline_failures": sum(not r["preserved"] for r in results if not r["materialize"]),
                       "intervention_failures": sum(not r["preserved"] for r in results if r["materialize"])}))
     # A causal diagnostic: controls must preserve state; only pending FP32
@@ -241,4 +274,3 @@ if __name__ == "__main__":
     for result in results:
         expected_preserved = result["materialize"] or not result["pending"][0]
         assert result["preserved"] == expected_preserved, result
-
