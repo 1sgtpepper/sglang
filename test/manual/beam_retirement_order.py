@@ -6,10 +6,14 @@ The production scheduler barrier and beam commit/cleanup then run on a separate
 stream. This is a component integration test, not a model-serving test.
 """
 
+import ctypes
 import faulthandler
 import json
+import mmap
 import os
-import threading
+import subprocess
+import sys
+import tempfile
 from array import array
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,6 +23,7 @@ from cuda.bindings import driver
 
 from sglang.srt.beam_search.beam_group import BeamGroup
 from sglang.srt.beam_search.coordinator import BeamCoordinator
+from sglang.srt.beam_search.fork import collect_orphan_slots
 from sglang.srt.managers.overlap_utils import FutureMap
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, Req
 from sglang.srt.managers.scheduler import Scheduler
@@ -68,7 +73,6 @@ def run(mode):
     forward, schedule, release = torch.cuda.Stream(), torch.cuda.Stream(), torch.cuda.Stream()
     parent = torch.tensor([0, 0], device="cuda", dtype=torch.int64)
     tokens = torch.tensor([12, 13], device="cuda", dtype=torch.int64)
-    gate = torch.zeros(1, device="cuda", dtype=torch.int32)
     # Warm every data-dependent operation before holding a stream. This also
     # keeps cudaMalloc/module initialization from providing incidental fences.
     for _ in range(3):
@@ -81,6 +85,10 @@ def run(mode):
             c.commit_decode(SimpleNamespace(reqs=[leader], forward_iter=2))
         torch.cuda.synchronize()
     del p, a, leader, g, c
+    with torch.cuda.stream(schedule):
+        empty_history = torch.zeros((2, 3), device="cuda", dtype=torch.int32)
+        collect_orphan_slots(empty_history, empty_history)
+    schedule.synchronize()
     pool, allocator, leader, group, coordinator = fixture()
     initial_free = allocator.get_all_free_pages().cpu().tolist()
     member = int(group.member_rows_cpu[0])
@@ -102,29 +110,42 @@ def run(mode):
         model_worker=SimpleNamespace(last_shared_read_runner=graph_owner.model_runner),
     )
     finished = torch.cuda.Event()
-    gate.fill_(0)
+    gate_file = tempfile.TemporaryFile()
+    gate_file.truncate(mmap.PAGESIZE)
+    gate_mapping = mmap.mmap(gate_file.fileno(), mmap.PAGESIZE)
+    gate = ctypes.c_uint32.from_buffer(gate_mapping)
+    gate.value = 0
+    gate_address = ctypes.addressof(gate)
+    status, = driver.cuMemHostRegister(gate_address, mmap.PAGESIZE, 2)
+    assert status == driver.CUresult.CUDA_SUCCESS, status
+    status, device_gate = driver.cuMemHostGetDevicePointer(gate_address, 0)
+    assert status == driver.CUresult.CUDA_SUCCESS, status
     torch.cuda.synchronize()
     pending = []
     held = False
-    rescued = threading.Event()
-
-    def rescue():
-        rescued.set()
-        with torch.cuda.stream(release):
-            gate.fill_(1)
-
-    timer = threading.Timer(15, rescue)
+    done_read, done_write = os.pipe()
+    # A separate CPU process can release the mapped gate even if an unexpected
+    # synchronous allocator call holds the interpreter lock. Such a run is
+    # diagnostic failure, never evidence of the candidate.
+    watchdog = subprocess.Popen(
+        [sys.executable, "-c", "import mmap,os,select,sys; "
+         "m=mmap.mmap(int(sys.argv[1]),mmap.PAGESIZE); "
+         "ready=select.select([int(sys.argv[2])],[],[],15)[0]; "
+         "m.__setitem__(slice(0,4),bytes([1,0,0,0])) if not ready else None; "
+         "sys.exit(0 if ready else 2)", str(gate_file.fileno()), str(done_read)],
+        pass_fds=(gate_file.fileno(), done_read),
+    )
+    watchdog_fired = False
     try:
         with torch.cuda.stream(forward):
             graph.replay()
             DecodeCudaGraphRunner._publish_read_done(graph_owner, in_graph=True)
             status, = driver.cuStreamWaitValue32(
                 driver.CUstream(forward.cuda_stream),
-                driver.CUdeviceptr(gate.data_ptr()), 1, 1,
+                device_gate, 1, 1,
             )
             assert status == driver.CUresult.CUDA_SUCCESS, status
             held = True
-            timer.start()
             print(json.dumps({"mode": mode, "phase": "gate installed"}), flush=True)
             coordinator._apply_survivors(
                 group, tokens, None if mode == "final" else parent, 2,
@@ -142,8 +163,7 @@ def run(mode):
         if mode in ("coarse", "late"):
             # The scheduler already waits for the remap. Open the deterministic
             # gate before invoking the data-dependent cleanup on that stream.
-            with torch.cuda.stream(release):
-                gate.fill_(1)
+            gate.value = 1
             held = False
         with torch.cuda.stream(schedule):
             if mode in ("early", "ordinary") and pending:
@@ -169,10 +189,11 @@ def run(mode):
                 expected_mapping = replacement.cpu().tolist()
         schedule.synchronize()
         if held:
-            with torch.cuda.stream(release):
-                gate.fill_(1)
+            gate.value = 1
             held = False
         forward.synchronize()
+        os.write(done_write, b"1")
+        watchdog_fired = watchdog.wait(timeout=5) != 0
         if mode == "ordinary":
             leader.to_finish = FINISH_ABORT("cancelled")
             with torch.cuda.stream(schedule):
@@ -192,22 +213,31 @@ def run(mode):
             replacement_preserved=expected_mapping == observed_mapping,
             idempotent_retire=True,
             initial_free_count=len(initial_free), final_free_count=len(free_after_repeat),
-            watchdog_released_gate=rescued.is_set(),
+            watchdog_released_gate=watchdog_fired,
         )
         print(json.dumps(result), flush=True)
         return result
     finally:
-        timer.cancel()
         if held:
-            with torch.cuda.stream(release):
-                gate.fill_(1)
+            gate.value = 1
         torch.cuda.synchronize()
+        if watchdog.poll() is None:
+            os.write(done_write, b"1")
+            watchdog.wait(timeout=5)
+        os.close(done_read)
+        os.close(done_write)
+        status, = driver.cuMemHostUnregister(gate_address)
+        assert status == driver.CUresult.CUDA_SUCCESS, status
+        del gate
+        gate_mapping.close()
+        gate_file.close()
 
 
 if __name__ == "__main__":
     faulthandler.dump_traceback_later(10, repeat=False)
     results = [run(mode) for mode in ("early", "coarse", "late", "ordinary", "final")]
     faulthandler.cancel_dump_traceback_later()
+    assert not any(r["watchdog_released_gate"] for r in results), results
     assert results[0]["retired_before_remap_completed"]
     assert not results[0]["replacement_preserved"]
     assert all(result["replacement_preserved"] for result in results[1:])
