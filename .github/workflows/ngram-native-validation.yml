@@ -29,8 +29,8 @@ jobs:
           mkdir -p /tmp/ngram-validation
           for variant in baseline patched; do
             if [[ "$variant" == patched ]]; then
-              git apply --check "$tests/cached-miss.patch"
-              git apply "$tests/cached-miss.patch"
+              git apply --unidiff-zero --check "$tests/cached-miss.patch"
+              git apply --unidiff-zero "$tests/cached-miss.patch"
             fi
             for test in runtime_repro regression; do
               binary="/tmp/ngram-validation/$variant-$test"
@@ -71,3 +71,38 @@ jobs:
             "$src/trie.cpp" "$src/result.cpp" "$src/suffix_automaton.cpp" \
             -o /tmp/ngram-validation/sanitized
           timeout 60 /tmp/ngram-validation/sanitized
+
+  python:
+    if: github.repository == '1sgtpepper/sglang'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      MAX_JOBS: '2'
+      CARGO_BUILD_JOBS: '2'
+      SGLANG_USE_CPU_ENGINE: '1'
+      UV_SYSTEM_PYTHON: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@v5
+      - name: Install repository dependencies
+        timeout-minutes: 25
+        run: |
+          bash scripts/ci/utils/install_rust_protoc.sh
+          uv pip install -e "python[dev]" --index-strategy unsafe-best-match --prerelease allow
+      - name: Execute baseline and patched Python FFI regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          python -m pytest -q test/ngram-native-validation/ffi_regression.py > /tmp/baseline-ffi.log 2>&1 || status=$?
+          cat /tmp/baseline-ffi.log
+          test "$status" -eq 1
+          grep -F 'Arrays are not equal' /tmp/baseline-ffi.log
+          git apply --unidiff-zero test/ngram-native-validation/cached-miss.patch
+          python -m pytest -q test/ngram-native-validation/ffi_regression.py
+          python -m pytest -q test/registered/unit/spec/test_ngram_corpus.py

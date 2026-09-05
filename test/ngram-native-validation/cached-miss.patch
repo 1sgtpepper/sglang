@@ -1,57 +1,25 @@
---- a/python/sglang/kernels/jit/csrc/ngram_corpus/trie.h
-+++ b/python/sglang/kernels/jit/csrc/ngram_corpus/trie.h
-@@ -51,6 +51,8 @@
- // the full request length covered by those cached anchors.
- struct MatchState {
-   uint64_t trie_epoch = 0;
-+  // Cached misses remain valid only while the trie has not grown.
-+  uint64_t growth_epoch = 0;
-   size_t processed_total_len = 0;
-   std::vector<NodeRef> anchors;
- };
-@@ -139,6 +141,7 @@
-   std::vector<TrieNode*> path_;
-   Param param_;
-   uint64_t trie_epoch_ = 1;
-+  uint64_t growth_epoch_ = 1;
- };
- 
- }  // namespace ngram
+diff --git a/python/sglang/kernels/jit/csrc/ngram_corpus/trie.cpp b/python/sglang/kernels/jit/csrc/ngram_corpus/trie.cpp
+index cc05a016a..c5859f7ac 100644
 --- a/python/sglang/kernels/jit/csrc/ngram_corpus/trie.cpp
 +++ b/python/sglang/kernels/jit/csrc/ngram_corpus/trie.cpp
-@@ -37,6 +37,7 @@
-       if (iter == cursor->child.end()) {
-         iter = cursor->child.insert({token, getNode()}).first;
-         auto node = iter->second;
+@@ -39,0 +40 @@ void Trie::insert(const int32_t* tokens, size_t len) {
 +        ++growth_epoch_;
- 
-         cursor->lru.emplace_front(node);
-         global_lru_.emplace_back(node);
-@@ -118,6 +119,11 @@
-     return false;
-   }
-   for (const auto& ref : state.anchors) {
+@@ -120,0 +122,5 @@ bool Trie::validateMatchState_(const MatchState& state) const {
 +    // A new edge can make a previously missing suffix matchable without
 +    // changing the version of any live cached node.
 +    if (ref.ptr == nullptr && state.growth_epoch != growth_epoch_) {
 +      return false;
 +    }
-     if (ref.ptr && !resolve(state, ref)) {
-       return false;
-     }
-@@ -128,6 +134,7 @@
- void Trie::rebuildMatchState_(const int32_t* context, size_t len, MatchState& state, size_t total_len) const {
-   const auto max_match_depth = std::min(len, param_.max_trie_depth);
-   state.trie_epoch = trie_epoch_;
+@@ -130,0 +137 @@ void Trie::rebuildMatchState_(const int32_t* context, size_t len, MatchState& st
 +  state.growth_epoch = growth_epoch_;
-   state.processed_total_len = total_len;
-   state.anchors.assign(max_match_depth, {});
-   for (size_t match_depth = 1; match_depth <= max_match_depth; ++match_depth) {
-@@ -186,6 +193,7 @@
-   }
- 
-   state.processed_total_len = total_len;
+@@ -188,0 +196 @@ bool Trie::advanceMatchState_(MatchState& state, const int32_t* tokens, size_t l
 +  state.growth_epoch = growth_epoch_;
-   return true;
- }
- 
+diff --git a/python/sglang/kernels/jit/csrc/ngram_corpus/trie.h b/python/sglang/kernels/jit/csrc/ngram_corpus/trie.h
+index 4fa58c4c2..a7ef088ab 100644
+--- a/python/sglang/kernels/jit/csrc/ngram_corpus/trie.h
++++ b/python/sglang/kernels/jit/csrc/ngram_corpus/trie.h
+@@ -53,0 +54,2 @@ struct MatchState {
++  // Cached misses remain valid only while the trie has not grown.
++  uint64_t growth_epoch = 0;
+@@ -141,0 +144 @@ class Trie {
++  uint64_t growth_epoch_ = 1;
