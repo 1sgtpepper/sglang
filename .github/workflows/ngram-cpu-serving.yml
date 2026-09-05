@@ -48,7 +48,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libnuma-dev numactl libgoogle-perftools-dev libtbb-dev
           uv pip install -e python 'apache-tvm-ffi==0.1.11' 'scikit-build-core>=0.10' wheel --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --prerelease allow
-          python -c 'import torch; print(torch.__version__); assert torch.version.cuda is None; assert torch.cpu._is_amx_tile_supported(), "runner does not expose AMX"'
+          lscpu
+          python -c 'import torch; print(torch.__version__, dict(torch.cpu.get_capabilities())); assert torch.version.cuda is None'
       - uses: actions/cache@v4
         id: cpu_wheel
         with:
@@ -60,7 +61,7 @@ jobs:
       - name: Verify CPU backend and stage compiled modules
         run: |
           uv pip install "$RUNNER_TEMP"/cpu-wheels/*.whl
-          python -c 'from sglang.srt.utils import cpu_has_amx_support; assert cpu_has_amx_support(), "real AMX backend is unavailable"'
+          python -c 'import torch, sgl_kernel; assert hasattr(torch.ops.sgl_kernel, "convert_weight_packed"), "CPU kernel was not built"'
           bash scripts/ci/utils/stage_rust_ext_modules.sh
           mv rust-ext-staging "$RUNNER_TEMP/rust-ext-staging"
           git restore python/pyproject.toml python/sglang/kernels/aot/pyproject.toml
@@ -111,7 +112,8 @@ jobs:
           uv pip install -e python 'apache-tvm-ffi==0.1.11' --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match --prerelease allow
           uv pip install "$RUNNER_TEMP"/cpu-wheels/*.whl
           git restore python/pyproject.toml
-          python -c 'import torch; from sglang.srt.utils import cpu_has_amx_support; assert torch.version.cuda is None; assert cpu_has_amx_support(), "runner cannot serve with AMX"'
+          lscpu
+          python -c 'import torch; from sglang.srt.utils import cpu_has_amx_support; print(torch.__version__, dict(torch.cpu.get_capabilities())); assert torch.version.cuda is None; assert cpu_has_amx_support(), "runner cannot serve with AMX"'
           python - <<'PY' >> "$GITHUB_ENV"
           import importlib.metadata as m
           import os
