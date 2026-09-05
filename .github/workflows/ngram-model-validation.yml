@@ -1,0 +1,112 @@
+name: NGRAM model and API validation
+on:
+  push:
+    branches: [validation/ngram-serving]
+permissions:
+  contents: read
+jobs:
+  model-and-api:
+    if: github.repository == '1sgtpepper/sglang'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MAX_JOBS: '2'
+      CARGO_BUILD_JOBS: '2'
+      SGLANG_USE_CPU_ENGINE: '1'
+      UV_SYSTEM_PYTHON: '1'
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: ngram-target-7ae557604adf67be50417f59c2c2f167def9a775
+      - name: Install repository dependencies
+        run: |
+          bash scripts/ci/utils/install_rust_protoc.sh
+          uv pip install -e "python[dev]" --index-strategy unsafe-best-match --prerelease allow
+      - name: Verify real-model predictions and profile the CPU path
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a test/ngram-model-validation "$RUNNER_TEMP/ngram-model-harness"
+          mkdir -p "$RUNNER_TEMP/ngram-model-results"
+          lscpu > "$RUNNER_TEMP/ngram-model-results/cpu.txt"
+          python -m pip freeze > "$RUNNER_TEMP/ngram-model-results/dependencies.txt"
+          git fetch --no-tags origin bd16c22a04b0eb9bc2e775795bda6b11727a5d38 17b250829c15b11563c0ff6098c97962ec6c2aa7
+          for variant in baseline patched; do
+            revision=bd16c22a04b0eb9bc2e775795bda6b11727a5d38
+            if [[ "$variant" == patched ]]; then revision=17b250829c15b11563c0ff6098c97962ec6c2aa7; fi
+            git checkout --force --detach "$revision"
+            test "$(git rev-parse HEAD)" = "$revision"
+            python "$RUNNER_TEMP/ngram-model-harness/check.py" model "$variant" "$RUNNER_TEMP/ngram-model-results"
+            test -z "$(git status --porcelain)"
+          done
+      - name: Compare actual corpus API timing in interleaved trials
+        shell: bash
+        run: |
+          set -euo pipefail
+          for trial in 0 1 2 3 4 5; do
+            variants='baseline patched'
+            if (( trial % 2 )); then variants='patched baseline'; fi
+            for variant in $variants; do
+              revision=bd16c22a04b0eb9bc2e775795bda6b11727a5d38
+              if [[ "$variant" == patched ]]; then revision=17b250829c15b11563c0ff6098c97962ec6c2aa7; fi
+              git checkout --force --detach "$revision"
+              test "$(git rev-parse HEAD)" = "$revision"
+              python "$RUNNER_TEMP/ngram-model-harness/check.py" benchmark "$variant" "$RUNNER_TEMP/ngram-model-results" --trial "$trial"
+              test -z "$(git status --porcelain)"
+            done
+          done
+      - name: Check paired results and summarize measurements
+        env:
+          RESULTS: ${{ runner.temp }}/ngram-model-results
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import statistics
+          from pathlib import Path
+
+          root = Path(os.environ["RESULTS"])
+          models = [json.loads((root / f"{variant}-model.json").read_text()) for variant in ("baseline", "patched")]
+          assert all(len(model["cases"]) == 16 for model in models)
+          assert models[0]["revision"] == models[1]["revision"]
+          for old, new in zip(models[0]["cases"], models[1]["cases"]):
+              assert old["reference"] == new["reference"]
+              assert old["drafts"][1] == new["drafts"][0] == new["drafts"][1]
+          timings = {variant: [json.loads((root / f"{variant}-timing-{trial}.json").read_text()) for trial in range(6)] for variant in ("baseline", "patched")}
+          summary = []
+          for index in range(12):
+              samples = {variant: [trial[index] for trial in trials] for variant, trials in timings.items()}
+              assert len({row["checksum"] for rows in samples.values() for row in rows}) == 1
+              key = {field: samples["baseline"][0][field] for field in ("batch_size", "live", "growth")}
+              assert all(all(row[field] == value for field, value in key.items()) for rows in samples.values() for row in rows)
+              for variant, rows in samples.items():
+                  values = [row["query_us"] for row in rows]
+                  key[variant] = {"median_query_us": statistics.median(values), "min_query_us": min(values), "max_query_us": max(values), "median_update_us": statistics.median(row["update_us"] for row in rows)}
+              summary.append(key)
+          for variant in ("baseline", "patched"):
+              trace = json.loads((root / f"{variant}-profile.json").read_text())
+              names = {event.get("name") for event in trace["traceEvents"]}
+              assert {"ngram_match", "target_forward", "greedy_verify"} <= names
+          (root / "summary.json").write_text(json.dumps(summary, indent=2))
+          print(json.dumps(summary, indent=2))
+          print("32 real-model cases; 144 API timing cases; two CPU profiles verified")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ngram-model-and-api-results
+          path: ${{ runner.temp }}/ngram-model-results
+          if-no-files-found: error
+          retention-days: 7
