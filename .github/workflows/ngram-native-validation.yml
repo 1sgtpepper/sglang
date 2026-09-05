@@ -32,15 +32,18 @@ jobs:
               git apply --unidiff-zero --check "$tests/cached-miss.patch"
               git apply --unidiff-zero "$tests/cached-miss.patch"
             fi
-            for test in runtime_repro regression; do
+            for test in runtime_repro regression causal; do
               binary="/tmp/ngram-validation/$variant-$test"
               "$CXX" -std=c++20 -O2 -pthread -I "$src" \
                 "$tests/$test.cc" "$src/ngram.cpp" "$src/trie.cpp" \
                 "$src/result.cpp" "$src/suffix_automaton.cpp" -o "$binary"
               status=0
-              timeout 60 "$binary" > "$binary.log" 2>&1 || status=$?
+              timeout 60 "$binary" "$variant" > "$binary.log" 2>&1 || status=$?
               cat "$binary.log"
-              if [[ "$variant" == baseline ]]; then
+              if [[ "$test" == causal ]]; then
+                test "$status" -eq 0
+                grep -Fx "null-only interventions=6 negative-controls=2 passed" "$binary.log"
+              elif [[ "$variant" == baseline ]]; then
                 test "$status" -eq 1
                 if [[ "$test" == runtime_repro ]]; then
                   grep -Fx 'BFS cached=30,70,80,90, fresh=30,40,50,60, FAIL: newly inserted longest match is omitted' "$binary.log"
@@ -98,11 +101,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python test/ngram-native-validation/downstream.py baseline
           status=0
           python -m pytest -q test/ngram-native-validation/ffi_regression.py > /tmp/baseline-ffi.log 2>&1 || status=$?
           cat /tmp/baseline-ffi.log
           test "$status" -eq 1
           grep -F 'Arrays are not equal' /tmp/baseline-ffi.log
           git apply --unidiff-zero test/ngram-native-validation/cached-miss.patch
+          python test/ngram-native-validation/downstream.py patched
           python -m pytest -q test/ngram-native-validation/ffi_regression.py
           python -m pytest -q test/registered/unit/spec/test_ngram_corpus.py
