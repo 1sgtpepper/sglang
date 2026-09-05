@@ -1,9 +1,7 @@
-"""Proposed Python/FFI regression; syntax checked, NOT executed in this audit.
+"""Standalone replay of the supplied Python FFI regression.
 
-Run in an installed, pinned SGLang checkout with:
-    python -m pytest -q /path/to/ci_regression.py
-For upstream integration, place the test method in the existing
-TestNgramCorpusIncremental class in test/registered/unit/spec/test_ngram_corpus.py.
+The upstream candidate integrates this case into TestNgramCorpusIncremental in
+test/registered/unit/spec/test_ngram_corpus.py. Fork CI executes both forms.
 """
 
 import unittest
