@@ -74,6 +74,7 @@ jobs:
         uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2
         with:
           args: --config .github/linters/lychee.toml README.md
+          output: ${{ runner.temp }}/ngram-link-check.md
 
       # docs/ (Mintlify) internal-link check. Runs only in CI — contributors
       # are NOT required to install `mint` for local pre-commit. External links
@@ -105,4 +106,6 @@ jobs:
           mint broken-links --check-anchors --check-redirects
 
       - name: Verify lint left candidate unchanged
-        run: test -z "$(git status --porcelain)"
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
