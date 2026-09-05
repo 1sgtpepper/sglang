@@ -53,9 +53,35 @@ jobs:
       - name: Check recurrent state across backup and restore
         env:
           PYTHONPATH: ${{ github.workspace }}/python
-        run: python test/manual/replayssm_retraction.py
+        run: python test/manual/replayssm_retraction.py --case matrix
       - name: Check beam retirement ordering
         if: ${{ !cancelled() }}
         env:
           PYTHONPATH: ${{ github.workspace }}/python
-        run: python test/manual/beam_retirement_order.py
+        run: python test/manual/beam_retirement_order.py --case matrix
+      - name: Check standalone baseline failures and causal controls
+        env:
+          PYTHONPATH: ${{ github.workspace }}/python
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+
+          cases = [
+              ("replayssm_retraction.py", [], 1, "Accepted recurrence was lost"),
+              ("replayssm_retraction.py", ["--case", "materialize"], 0, None),
+              ("beam_retirement_order.py", [], 1, "Retired beam work overwrote"),
+              ("beam_retirement_order.py", ["--case", "late"], 0, None),
+          ]
+          for script, args, expected_exit, expected_error in cases:
+              result = subprocess.run(
+                  [sys.executable, "test/manual/" + script, *args],
+                  text=True, capture_output=True, timeout=90,
+              )
+              print(result.stdout, end="")
+              print(result.stderr, end="")
+              assert result.returncode == expected_exit, (script, result.returncode)
+              if expected_error:
+                  assert expected_error in result.stderr, (script, result.stderr)
+              print(f"{script} {args}: expected exit {expected_exit} confirmed")
+          PY
