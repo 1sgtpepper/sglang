@@ -3,6 +3,11 @@ name: Lifecycle correctness validation
 on:
   push:
     branches: [validation/lifecycle-correctness]
+    paths:
+      - .github/workflows/lifecycle-correctness-validation.yml
+      - .github/lifecycle-environment.txt
+      - test/manual/replayssm_retraction.py
+      - test/manual/beam_retirement_order.py
   workflow_dispatch:
 
 permissions:
@@ -11,39 +16,59 @@ permissions:
 jobs:
   focused:
     runs-on: [self-hosted, linux, x64, lifecycle-validation]
-    timeout-minutes: 20
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONPATH: ${{ github.workspace }}/python
+      OMP_NUM_THREADS: "1"
+      MAX_JOBS: "1"
+      CC: /usr/bin/gcc-15
+      CXX: /usr/bin/g++-15
     steps:
       - uses: actions/checkout@v4
-      - name: Install import dependencies
+      - name: Verify the clean pinned runtime
         run: |
-          uv pip install --python "$(command -v python)" --no-deps --only-binary :all: \
-            msgspec orjson psutil pybase64 pillow requests starlette fastapi \
-            pydantic pydantic-core annotated-types typing-inspection anyio sniffio \
-            httpx httpcore h11 certifi charset-normalizer idna urllib3 \
-            transformers==5.12.1 tokenizers==0.22.2 huggingface-hub safetensors \
-            regex pyyaml tqdm packaging typing-extensions filelock fsspec \
-            einops nvidia-ml-py torch-memory-saver uvloop uvicorn python-multipart \
-            setproctitle pyzmq gguf compressed-tensors==0.18.0 \
-            apache-tvm-ffi==0.1.11 cuda-python cuda-bindings cuda-pathfinder \
-            torchvision torchcodec xgrammar==0.2.1 llguidance outlines==0.1.11 \
-            diskcache cloudpickle jsonschema referencing rpds-py attrs \
-            scipy nest-asyncio
-          uv pip install --python "$(command -v python)" --only-binary :all: \
-            ipython aiohttp anthropic openai==2.6.1 partial-json-parser \
-            prometheus-client interegular sentencepiece tiktoken
-          uv pip install --python "$(command -v python)" --only-binary :all: \
-            loguru click protobuf xxhash fastapi uvicorn
-          uv pip install --python "$(command -v python)" --no-deps --only-binary :all: \
-            sglang-kernel==0.4.6.post1 flashinfer-python==0.6.18 \
-            nvidia-cutlass-dsl==4.6.2 \
-            nvidia-cutlass-dsl-libs-base==4.6.2 nvidia-cutlass-dsl-libs-cu13==4.6.2 \
-            nvidia-cudnn-frontend nccl4py ninja tabulate
+          set -o pipefail
+          mkdir -p evidence
+          python - <<'PY' | tee evidence/environment-verification.log
+          import importlib.metadata as metadata
+          import json
+          from pathlib import Path
+          import sys
+          from packaging.requirements import Requirement
+
+          assert sys.version_info[:2] == (3, 12)
+          prefix = Path(sys.prefix).absolute()
+          distributions = list(metadata.distributions())
+          assert all(Path(d.locate_file("")).absolute().is_relative_to(prefix)
+                     for d in distributions), "An inherited package environment is not permitted"
+          checked = 0
+          for line in Path(".github/lifecycle-environment.txt").read_text().splitlines():
+              if not line or line.startswith("#"):
+                  continue
+              required = Requirement(line)
+              actual = metadata.distribution(required.name)
+              assert required.specifier.contains(actual.version, prereleases=True), required.name
+              if required.url is not None:
+                  assert required.name == "cuda-tile" and actual.version == "1.6.0rc5"
+                  direct = json.loads(actual.read_text("direct_url.json"))
+                  assert direct["url"] == "https://pypi.nvidia.com/cuda-tile/cuda_tile-1.6.0rc5-cp312-cp312-manylinux2014_x86_64.whl"
+              checked += 1
+          assert checked == 202
+          print({"python": sys.version, "prefix": str(prefix), "verified_packages": checked,
+                 "inherited_distribution_roots": 0})
+          PY
+          uv pip check --python "$(command -v python)" 2>&1 | tee evidence/dependency-check.log
+          uv pip freeze --python "$(command -v python)" > evidence/packages.txt
+          python -m sglang.check_env > evidence/check-env.txt 2>&1
       - name: Inspect runtime imports
-        env:
-          PYTHONPATH: ${{ github.workspace }}/python
         run: |
           python - <<'PY'
           import torch, triton
+          assert torch.__version__ == "2.13.0+cu130"
+          assert triton.__version__ == "3.7.1"
           print({"torch": torch.__version__, "triton": triton.__version__,
                  "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name()})
           from sglang.srt.mem_cache.memory_pool import MambaPool, HybridReqToTokenPool
@@ -51,19 +76,13 @@ jobs:
           print("Production pool and beam coordinator imports passed.")
           PY
       - name: Check recurrent state across backup and restore
-        env:
-          PYTHONPATH: ${{ github.workspace }}/python
-        run: python test/manual/replayssm_retraction.py --case matrix
+        run: python test/manual/replayssm_retraction.py --case matrix 2>&1 | tee evidence/recurrence-matrix.log
       - name: Check beam retirement ordering
         if: ${{ !cancelled() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}/python
-        run: python test/manual/beam_retirement_order.py --case matrix
+        run: python test/manual/beam_retirement_order.py --case matrix 2>&1 | tee evidence/beam-matrix.log
       - name: Check standalone baseline failures and causal controls
-        env:
-          PYTHONPATH: ${{ github.workspace }}/python
         run: |
-          python - <<'PY'
+          python - <<'PY' | tee evidence/standalone-contrasts.log
           import subprocess
           import sys
 
@@ -85,3 +104,17 @@ jobs:
                   assert expected_error in result.stderr, (script, result.stderr)
               print(f"{script} {args}: expected exit {expected_exit} confirmed")
           PY
+      - name: Preserve the replay environment and results
+        if: always()
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/revision.txt
+          git diff --exit-code -- python
+          cp .github/lifecycle-environment.txt evidence/
+          cp test/manual/replayssm_retraction.py test/manual/beam_retirement_order.py evidence/
+          find evidence -type f -exec sha256sum {} + > checksums.txt
+          tar -czf lifecycle-evidence.tar.gz evidence checksums.txt
+          sha256sum lifecycle-evidence.tar.gz
+          echo 'BEGIN_LIFECYCLE_EVIDENCE_BASE64'
+          base64 -w 76 lifecycle-evidence.tar.gz
+          echo 'END_LIFECYCLE_EVIDENCE_BASE64'
