@@ -2,12 +2,13 @@ name: Lint
 
 on:
   push:
-    branches: [main]
+    branches: [validation/retraction-state]
   pull_request:
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     env:
       MINT_VERSION: 4.2.559
     steps:
