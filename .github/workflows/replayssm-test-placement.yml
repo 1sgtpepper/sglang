@@ -1,0 +1,57 @@
+name: Validate ReplaySSM test placement
+on:
+  push:
+    branches: [validation/replayssm-test-placement-ci]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  placement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e99fdb521552ea2abb12dad0f10f0305a9c9f216
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-3|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Check repository hooks on the complete PR file list
+        run: |
+          test "$(git rev-parse HEAD)" = e99fdb521552ea2abb12dad0f10f0305a9c9f216
+          git fetch --no-tags --depth=1 origin ccf9fe6590ee7437005d8353c3c67d2dc4d25fcb 8062a14b42ef51e6428ed541a646ed9dd8039444
+          python -m pip install pre-commit
+          mapfile -t changed < <(git diff --name-only --diff-filter=ACMR ccf9fe6590ee7437005d8353c3c67d2dc4d25fcb HEAD)
+          pre-commit run --show-diff-on-failure --verbose --files "${changed[@]}"
+      - name: Verify current upstream taxonomy and unchanged test behavior
+        run: |
+          git fetch --no-tags --depth=1 https://github.com/sgl-project/sglang.git 88a9bfd1ffdec1d13ebe86c7de53c93fd19d351d
+          git show 88a9bfd1ffdec1d13ebe86c7de53c93fd19d351d:scripts/lint/check_registered_tests.py > /tmp/current_registration_checker.py
+          python - <<'PYCODE'
+          import ast, importlib.util, pathlib, subprocess
+          def load(name, path):
+              spec = importlib.util.spec_from_file_location(name, path)
+              module = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(module)
+              return module
+          registry = load("ci_register", "python/sglang/test/ci/ci_register.py")
+          checker = load("checker", "/tmp/current_registration_checker.py")
+          old_path = "test/registered/unit/managers/test_retraction_replayssm_state.py"
+          path = "test/registered/kernel/mem_cache/test_retraction_replayssm_state.py"
+          text = pathlib.Path(path).read_text()
+          old = subprocess.check_output(["git", "show", "8062a14b42ef51e6428ed541a646ed9dd8039444:" + old_path], text=True)
+          assert text == old.replace('stage="base-b", runner_config="1-gpu-small"', 'stage="base-b-kernel-unit", runner_config="1-gpu-large"')
+          registrations, main = registry.ut_parse_one_file(path)
+          assert main and len(registrations) == 1
+          assert registrations[0].effective_suite == "base-b-kernel-unit-test-1-gpu-large"
+          errors = checker.taxonomy_errors(path, registrations, ast.parse(text))
+          assert not errors, errors
+          old_errors = checker.taxonomy_errors(old_path, registrations, ast.parse(text))
+          assert any("unit tests may register only CPU suites" in error for error in old_errors), old_errors
+          print("PASS: current taxonomy accepts new path and rejects old unit placement; six-case fixture unchanged; kernel suite dispatch name verified")
+          PYCODE
+          git diff --exit-code
