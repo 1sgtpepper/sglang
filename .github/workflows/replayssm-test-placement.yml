@@ -1,7 +1,7 @@
 name: Validate ReplaySSM test placement
 on:
   push:
-    branches: [validation/replayssm-test-placement-ci]
+    branches: [validation/replayssm-comment-ci]
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: e99fdb521552ea2abb12dad0f10f0305a9c9f216
+          ref: 6a68d581b9131f05555806bf63b4335e488e3549
       - uses: actions/setup-python@v4
         with:
           python-version: "3.12"
@@ -22,7 +22,7 @@ jobs:
           key: pre-commit-3|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Check repository hooks on the complete PR file list
         run: |
-          test "$(git rev-parse HEAD)" = e99fdb521552ea2abb12dad0f10f0305a9c9f216
+          test "$(git rev-parse HEAD)" = 6a68d581b9131f05555806bf63b4335e488e3549
           git fetch --no-tags --depth=1 origin ccf9fe6590ee7437005d8353c3c67d2dc4d25fcb 8062a14b42ef51e6428ed541a646ed9dd8039444
           python -m pip install pre-commit
           mapfile -t changed < <(git diff --name-only --diff-filter=ACMR ccf9fe6590ee7437005d8353c3c67d2dc4d25fcb HEAD)
