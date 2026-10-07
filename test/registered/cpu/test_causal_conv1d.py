@@ -193,9 +193,8 @@ class TestCausalConv1d(CustomTestCase):
         final_states = torch.randn(total_entries, dim, width - 1, dtype=dtype)
         final_states_ref = final_states.clone()
 
-        has_initial_states = torch.randint(0, 2, (batch,), dtype=torch.bool).fill_(
-            False
-        )
+        has_initial_states = torch.zeros(batch, dtype=torch.bool)
+        has_initial_states[0] = True
         state_indices = torch.randperm(total_entries, dtype=torch.int32)[:batch]
 
         out_ref = []
